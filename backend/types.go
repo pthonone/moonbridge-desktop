@@ -77,11 +77,10 @@ type UsageStats struct {
 
 // MBStatus represents Moon Bridge process status.
 type MBStatus struct {
-	Running       bool   `json:"running"`
-	Port          int    `json:"port"`
-	CurrentModel  string `json:"current_model"`
-	CurrentRoute  string `json:"current_route"`
-	Error         string `json:"error"`
+	Running      bool   `json:"running"`
+	Port         int    `json:"port"`
+	CurrentRoute string `json:"current_route"`
+	Error        string `json:"error"`
 }
 
 // LogEntry represents a single log line from Moon Bridge.

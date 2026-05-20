@@ -65,13 +65,7 @@ func (a *App) startup(ctx context.Context) {
 	_ = a.configMgr.SaveConfig(a.config)
 
 	// Sync Codex config on startup if enabled and installed
-	if codexEnabled && a.codexConfig != nil && a.codexConfig.IsInstalled() {
-		if err := a.codexConfig.Sync(a.config); err != nil {
-			fmt.Printf("[Codex] startup sync failed: %v\n", err)
-		} else {
-			fmt.Println("[Codex] config synced on startup")
-		}
-	}
+	a.syncCodexConfig()
 
 	// Initialize usage store for historical queries (even before bridge starts)
 	dataDir := a.configMgr.DataDir()
@@ -199,16 +193,7 @@ func (a *App) syncRoutes() {
 }
 
 func (a *App) defaultConfig() *backend.DesktopConfig {
-	presets := []backend.ProviderPreset{
-		backend.PresetProviderDeepseek(),
-		backend.PresetProviderQwen(),
-		backend.PresetProviderAnthropic(),
-		backend.PresetProviderOpenAI(),
-		backend.PresetProviderGoogle(),
-		backend.PresetProviderOpenRouter(),
-		backend.PresetProviderOllama(),
-		backend.PresetProviderSiliconFlow(),
-	}
+	presets := a.GetProviderPresets()
 	providers := make([]backend.ProviderConfig, 0, len(presets))
 	models := make([]backend.ModelConfig, 0)
 	for _, p := range presets {
@@ -238,15 +223,9 @@ func (a *App) defaultConfig() *backend.DesktopConfig {
 
 // GetStatus returns whether Moon Bridge is running and current config.
 func (a *App) GetStatus() backend.MBStatus {
-	if a.mbProcess != nil && a.mbProcess.IsRunning() {
-		return backend.MBStatus{
-			Running:      true,
-			Port:         a.config.Port,
-			CurrentRoute: a.config.DefaultRoute,
-		}
-	}
+	running := a.mbProcess != nil && a.mbProcess.IsRunning()
 	return backend.MBStatus{
-		Running:      false,
+		Running:      running,
 		Port:         a.config.Port,
 		CurrentRoute: a.config.DefaultRoute,
 	}
@@ -333,11 +312,23 @@ func (a *App) StopMoonBridge() error {
 
 // ----- Config -----
 
+// ensureConfigLoaded lazily loads config if nil.
+func (a *App) ensureConfigLoaded() error {
+	if a.config == nil {
+		cfg, err := a.configMgr.LoadConfig()
+		if err != nil {
+			return err
+		}
+		a.config = cfg
+	}
+	return nil
+}
+
 // GetConfig returns the current desktop config.
 func (a *App) GetConfig() backend.DesktopConfig {
+	_ = a.ensureConfigLoaded()
 	if a.config == nil {
-		cfg, _ := a.configMgr.LoadConfig()
-		a.config = cfg
+		return backend.DesktopConfig{}
 	}
 	return *a.config
 }
@@ -376,9 +367,8 @@ func (a *App) ListProviders() []backend.ProviderConfig {
 
 // AddProvider adds a new provider.
 func (a *App) AddProvider(p backend.ProviderConfig) error {
-	if a.config == nil {
-		cfg, _ := a.configMgr.LoadConfig()
-		a.config = cfg
+	if err := a.ensureConfigLoaded(); err != nil {
+		return err
 	}
 	// Check for duplicate key
 	for _, existing := range a.config.Providers {
@@ -460,9 +450,8 @@ func (a *App) ensureModelsFromOffers() {
 
 // UpdateProvider updates an existing provider by key.
 func (a *App) UpdateProvider(key string, p backend.ProviderConfig) error {
-	if a.config == nil {
-		cfg, _ := a.configMgr.LoadConfig()
-		a.config = cfg
+	if err := a.ensureConfigLoaded(); err != nil {
+		return err
 	}
 	for i, existing := range a.config.Providers {
 		if existing.Key == key {
@@ -479,9 +468,8 @@ func (a *App) UpdateProvider(key string, p backend.ProviderConfig) error {
 
 // DeleteProvider removes a provider by key.
 func (a *App) DeleteProvider(key string) error {
-	if a.config == nil {
-		cfg, _ := a.configMgr.LoadConfig()
-		a.config = cfg
+	if err := a.ensureConfigLoaded(); err != nil {
+		return err
 	}
 	newProviders := make([]backend.ProviderConfig, 0, len(a.config.Providers))
 	for _, p := range a.config.Providers {
@@ -501,9 +489,8 @@ func (a *App) DeleteProvider(key string) error {
 
 // SwitchModel changes the active route to use a different model.
 func (a *App) SwitchModel(routeAlias string) error {
-	if a.config == nil {
-		cfg, _ := a.configMgr.LoadConfig()
-		a.config = cfg
+	if err := a.ensureConfigLoaded(); err != nil {
+		return err
 	}
 	a.config.DefaultRoute = routeAlias
 	if err := a.configMgr.SaveConfig(a.config); err != nil {
@@ -604,21 +591,14 @@ func (a *App) ClearUsageAll() (int64, error) {
 }
 
 // getModelPricing returns pricing info for a model from the current config.
-func (a *App) getModelPricing(model string) *backend.ModelPricing {
-	if a.config == nil {
+func (a *App) getModelPricing(model string) *backend.Pricing {
+	if err := a.ensureConfigLoaded(); err != nil {
 		return nil
 	}
 	for _, p := range a.config.Providers {
 		for _, o := range p.Offers {
 			if o.Model == model {
-				return &backend.ModelPricing{
-					Input:          o.Pricing.Input,
-					Output:         o.Pricing.Output,
-					CacheRead:      o.Pricing.CacheRead,
-					CacheWrite:     o.Pricing.CacheWrite,
-					BillingMode:    o.Pricing.BillingMode,
-					PerRequestCost: o.Pricing.PerRequestCost,
-				}
+				return &o.Pricing
 			}
 		}
 	}
@@ -681,13 +661,13 @@ func inferModelMetadata(slug, providerKey string) (capabilities []string, series
 	}
 
 	// Keyword-based inference
-	if strings.Contains(slug, "vision") || strings.Contains(slug, "pro") || strings.Contains(slug, "sonnet") {
+	if strings.Contains(slug, "vision") || strings.Contains(slug, "sonnet") {
 		add("vision")
 	}
-	if strings.Contains(slug, "reasoning") || strings.Contains(slug, "o3") || strings.Contains(slug, "o4") || strings.Contains(slug, "max") {
+	if strings.Contains(slug, "reasoning") || strings.HasPrefix(slug, "o3") || strings.HasPrefix(slug, "o4") {
 		add("reasoning")
 	}
-	if strings.Contains(slug, "coder") || strings.Contains(slug, "code") || strings.Contains(slug, "codestral") {
+	if strings.Contains(slug, "coder") || strings.Contains(slug, "codestral") || strings.HasPrefix(slug, "code-") {
 		add("coding")
 	}
 	if strings.Contains(slug, "long") || strings.Contains(slug, "200k") || strings.Contains(slug, "500k") {
@@ -707,6 +687,12 @@ func inferModelMetadata(slug, providerKey string) (capabilities []string, series
 		add("vision")
 		add("reasoning")
 	}
+	if providerKey == "anthropic" && strings.Contains(slug, "pro") {
+		add("vision")
+	}
+	if providerKey == "deepseek" && strings.Contains(slug, "pro") {
+		add("vision")
+	}
 
 	if len(capabilities) == 0 {
 		capabilities = []string{}
@@ -716,9 +702,8 @@ func inferModelMetadata(slug, providerKey string) (capabilities []string, series
 
 // SetPort updates the listen port.
 func (a *App) SetPort(port int) error {
-	if a.config == nil {
-		cfg, _ := a.configMgr.LoadConfig()
-		a.config = cfg
+	if err := a.ensureConfigLoaded(); err != nil {
+		return err
 	}
 	a.config.Port = port
 	return a.configMgr.SaveConfig(a.config)
@@ -726,9 +711,8 @@ func (a *App) SetPort(port int) error {
 
 // SetLogLevel updates the log level.
 func (a *App) SetLogLevel(level string) error {
-	if a.config == nil {
-		cfg, _ := a.configMgr.LoadConfig()
-		a.config = cfg
+	if err := a.ensureConfigLoaded(); err != nil {
+		return err
 	}
 	a.config.LogLevel = level
 	return a.configMgr.SaveConfig(a.config)

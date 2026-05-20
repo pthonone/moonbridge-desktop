@@ -442,21 +442,9 @@ func createTrayIcon() syscall.Handle {
 }
 
 func createFallbackIcon() syscall.Handle {
-	// Use gdi32 APIs to create a 32x32 DIB section, fill with color, then
-	// convert to HICON via CreateIconIndirect.
-	gdi32 := syscall.NewLazyDLL("gdi32.dll")
-	procCreateCompatibleDC := gdi32.NewProc("CreateCompatibleDC")
-	procCreateCompatibleBitmap := gdi32.NewProc("CreateCompatibleBitmap")
-	procSelectObject := gdi32.NewProc("SelectObject")
-	procDeleteObject := gdi32.NewProc("DeleteObject")
-	procDeleteDC := gdi32.NewProc("DeleteDC")
-	procGetDIBits := gdi32.NewProc("GetDIBits")
-	procCreateIconIndirect := user32.NewProc("CreateIconIndirect")
-
-	const (
-		DIB_RGB_COLORS = 0
-		LR_DEFAULTSIZE = 0x0040
-	)
+	// Use gdi32 and user32 package-level procs to create a 32x32 DIB section,
+	// fill with color, then convert to HICON via CreateIconIndirect.
+	const DIB_RGB_COLORS = 0
 
 	// Screen DC for compatibility
 	hDC, _, _ := procGetDC.Call(0)

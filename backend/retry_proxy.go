@@ -168,22 +168,30 @@ func (e *SSEUsageExtractor) parseAnthropicSSE(data string) {
 	var msg struct {
 		Delta struct {
 			Usage *struct {
-				InputTokens  int `json:"input_tokens"`
-				OutputTokens int `json:"output_tokens"`
+				InputTokens              int `json:"input_tokens"`
+				OutputTokens             int `json:"output_tokens"`
+				CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+				CacheReadInputTokens     int `json:"cache_read_input_tokens"`
 			} `json:"usage"`
 		} `json:"delta"`
 		Usage *struct {
-			InputTokens  int `json:"input_tokens"`
-			OutputTokens int `json:"output_tokens"`
+			InputTokens              int `json:"input_tokens"`
+			OutputTokens             int `json:"output_tokens"`
+			CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+			CacheReadInputTokens     int `json:"cache_read_input_tokens"`
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal([]byte(data), &msg); err == nil {
 		if u := msg.Usage; u != nil {
 			e.inputTokens = u.InputTokens
 			e.outputTokens = u.OutputTokens
+			e.cacheWrite = u.CacheCreationInputTokens
+			e.cacheRead = u.CacheReadInputTokens
 		} else if u := msg.Delta.Usage; u != nil {
 			e.inputTokens = u.InputTokens
 			e.outputTokens = u.OutputTokens
+			e.cacheWrite = u.CacheCreationInputTokens
+			e.cacheRead = u.CacheReadInputTokens
 		}
 	}
 }
@@ -363,9 +371,6 @@ func (rp *RetryProxy) handleRequest(w http.ResponseWriter, r *http.Request) {
 					u.Usage.CacheCreationInputTokens,
 				)
 			}
-			if rp.recordRequest != nil {
-				rp.recordRequest(modelName)
-			}
 			rp.mu.Unlock()
 		} else {
 			// Fallback: OpenAI-style
@@ -381,23 +386,12 @@ func (rp *RetryProxy) handleRequest(w http.ResponseWriter, r *http.Request) {
 						0,
 					)
 				}
-				if rp.recordRequest != nil {
-					rp.recordRequest(modelName)
-				}
-				rp.mu.Unlock()
-			} else {
-				// No usage data, still record per-request
-				rp.mu.Lock()
-				if rp.recordRequest != nil {
-					rp.recordRequest(modelName)
-				}
 				rp.mu.Unlock()
 			}
 		}
-	} else {
-		// Non-200 or non-JSON: still record per-request
+		// Record per-request exactly once for successful response
 		rp.mu.Lock()
-		if rp.recordRequest != nil && lastResp.StatusCode == 200 {
+		if rp.recordRequest != nil {
 			rp.recordRequest(modelName)
 		}
 		rp.mu.Unlock()

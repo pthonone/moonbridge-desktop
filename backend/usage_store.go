@@ -18,15 +18,8 @@ type UsageStore struct {
 	getPricing func(model string) *ModelPricing
 }
 
-// ModelPricing holds pricing info for cost calculation.
-type ModelPricing struct {
-	Input          float64
-	Output         float64
-	CacheWrite     float64
-	CacheRead      float64
-	BillingMode    string  // "token" or "per_request"
-	PerRequestCost float64 // cost per API call when BillingMode is "per_request"
-}
+// ModelPricing is an alias for Pricing — same fields, no duplication.
+type ModelPricing = Pricing
 
 func NewUsageStore(dataDir string, getPricing func(string) *ModelPricing) (*UsageStore, error) {
 	os.MkdirAll(dataDir, 0755)
@@ -139,10 +132,11 @@ func (us *UsageStore) GetDailyStats(days int) []DailyUsageRow {
 
 // GetByModel returns usage grouped by model for a date range (local time).
 func (us *UsageStore) GetByModel(start, end time.Time) []ModelUsageRow {
+	endOfDay := time.Date(end.Year(), end.Month(), end.Day(), 23, 59, 59, 0, end.Location())
 	rows, err := us.db.Query(
 		"SELECT model, COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0), COALESCE(SUM(cache_read),0), COALESCE(SUM(cache_write),0), COALESCE(SUM(cost),0), COUNT(*) FROM usage_records WHERE timestamp >= ? AND timestamp <= ? GROUP BY model ORDER BY cost DESC",
 		start.Local().Format("2006-01-02 15:04:05"),
-		end.Local().Format("2006-01-02 15:04:05"),
+		endOfDay.Local().Format("2006-01-02 15:04:05"),
 	)
 	if err != nil {
 		return nil
