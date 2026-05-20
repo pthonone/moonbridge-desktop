@@ -188,6 +188,31 @@ func (us *UsageStore) Count(start, end time.Time) int {
 	return count
 }
 
+// GetHourlyStats returns usage stats for today grouped by hour (0-23).
+func (us *UsageStore) GetHourlyStats() []HourlyUsageRow {
+	now := time.Now()
+	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	rows := make([]HourlyUsageRow, 24)
+	for i := 0; i < 24; i++ {
+		rows[i].Hour = i
+	}
+	res, err := us.db.Query(
+		"SELECT CAST(strftime('%H', timestamp) AS INTEGER), COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0), COALESCE(SUM(cache_read),0), COALESCE(SUM(cache_write),0), COALESCE(SUM(cost),0), COUNT(*) FROM usage_records WHERE timestamp >= ? GROUP BY 1",
+		midnight.Local().Format("2006-01-02 15:04:05"),
+	)
+	if err != nil {
+		return rows
+	}
+	defer res.Close()
+	for res.Next() {
+		var r HourlyUsageRow
+		if err := res.Scan(&r.Hour, &r.InputTokens, &r.OutputTokens, &r.CacheRead, &r.CacheWrite, &r.Cost, &r.RequestCount); err == nil && r.Hour >= 0 && r.Hour < 24 {
+			rows[r.Hour] = r
+		}
+	}
+	return rows
+}
+
 // ClearToday removes all records from today.
 func (us *UsageStore) ClearToday() (int64, error) {
 	now := time.Now()
@@ -228,6 +253,17 @@ func (us *UsageStore) Close() error {
 		return us.db.Close()
 	}
 	return nil
+}
+
+// HourlyUsageRow represents one hour's aggregated usage.
+type HourlyUsageRow struct {
+	Hour         int     `json:"hour"`
+	InputTokens  int     `json:"input_tokens"`
+	OutputTokens int     `json:"output_tokens"`
+	CacheRead    int     `json:"cache_read"`
+	CacheWrite   int     `json:"cache_write"`
+	Cost         float64 `json:"cost"`
+	RequestCount int     `json:"request_count"`
 }
 
 // DailyUsageRow represents one day's aggregated usage.

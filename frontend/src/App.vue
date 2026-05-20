@@ -5,12 +5,13 @@ import LogViewer from './components/LogViewer.vue'
 import ProviderEditor from './components/ProviderEditor.vue'
 import ModelCard from './components/ModelCard.vue'
 import { EventsOn, EventsOff } from '@wailsjs/runtime/runtime'
-import { GetStatus, StartMoonBridge, StopMoonBridge, GetConfig, GetUsageStats, GetProviderPresets, ListModels, ListProviders, GetUsageDailyStats, GetUsageRecentRecords, GetUsageByModel, ClearUsageToday, ClearUsageAll, IsCodexEnabled, SetCodexEnabled } from '@wailsjs/go/main/App'
+import { GetStatus, StartMoonBridge, StopMoonBridge, GetConfig, GetUsageStats, GetProviderPresets, ListModels, ListProviders, GetUsageDailyStats, GetUsageHourlyStats, GetUsageRecentRecords, GetUsageByModel, ClearUsageToday, ClearUsageAll, IsCodexEnabled, SetCodexEnabled } from '@wailsjs/go/main/App'
 
 interface MBStatus { running: boolean; port: number; current_route: string; error: string }
 interface DesktopConfig { port: number; log_level: string; providers: any[]; models: any[]; routes: any[]; default_route: string; max_tokens: number; metrics_enabled: boolean }
 interface UsageStats { input_tokens: number; output_tokens: number; cache_read: number; cache_write: number; total_cost: number; request_count: number; cache_hit_rate: number }
 interface DailyRow { date: string; input_tokens: number; output_tokens: number; cache_read: number; cache_write: number; cost: number; request_count: number }
+interface HourlyRow { hour: number; input_tokens: number; output_tokens: number; cache_read: number; cache_write: number; cost: number; request_count: number }
 interface UsageRec { id: number; timestamp: string; model: string; input_tokens: number; output_tokens: number; cache_read: number; cache_write: number; cost: number }
 
 const status = ref<MBStatus>({ running: false, port: 38440, current_route: 'moonbridge', error: '' })
@@ -95,12 +96,13 @@ const availablePresets = computed(() => {
 })
 
 // Usage history data
+const hourlyStats = ref<HourlyRow[]>([])
 const dailyStats = ref<DailyRow[]>([])
 const recentRecords = ref<UsageRec[]>([])
 const modelUsageRows = ref<any[]>([])
-const usageRange = ref(7)
-const usageStart = ref('')
-const usageEnd = ref('')
+const usageRange = ref(0) // 0 = today (hourly), positive = last N days
+const usageStart = ref(todayStr())
+const usageEnd = ref(todayStr())
 
 function todayStr(): string {
   const d = new Date()
@@ -114,27 +116,51 @@ function daysAgo(n: number): string {
 }
 
 const rangePresets = [
+  { label: '当天', days: 0 },
   { label: '近 7 天', days: 7 },
   { label: '近 14 天', days: 14 },
   { label: '近 30 天', days: 30 },
-  { label: '近 90 天', days: 90 },
 ]
 
 async function loadUsageByRange(days: number) {
   usageRange.value = days
-  usageStart.value = daysAgo(days)
-  usageEnd.value = todayStr()
+  if (days === 0) {
+    // Today → hourly stats
+    try { hourlyStats.value = (await GetUsageHourlyStats()) || [] } catch (e: any) { hourlyStats.value = [] }
+    dailyStats.value = []
+  } else {
+    // Multi-day → daily stats
+    hourlyStats.value = []
+    try { dailyStats.value = (await GetUsageDailyStats(days)) || [] } catch (e: any) { dailyStats.value = [] }
+  }
+  const start = days === 0 ? todayStr() : daysAgo(days)
   try {
-    dailyStats.value = (await GetUsageDailyStats(days)) || []
+    modelUsageRows.value = (await GetUsageByModel(start, todayStr())) || []
+  } catch (e: any) {
+    modelUsageRows.value = []
+  }
+}
+
+async function loadCustomRange() {
+  if (usageStart.value === todayStr()) {
+    usageRange.value = 0
+    try { hourlyStats.value = (await GetUsageHourlyStats()) || [] } catch (e: any) { hourlyStats.value = [] }
+    dailyStats.value = []
+  } else {
+    try { dailyStats.value = (await GetUsageDailyStats(usageRange.value)) || [] } catch (e: any) { dailyStats.value = [] }
+    hourlyStats.value = []
+  }
+  try {
     modelUsageRows.value = (await GetUsageByModel(usageStart.value, usageEnd.value)) || []
   } catch (e: any) {}
 }
 
-async function loadCustomRange() {
+async function loadHourlyStats() {
   try {
-    dailyStats.value = (await GetUsageDailyStats(usageRange.value)) || []
-    modelUsageRows.value = (await GetUsageByModel(usageStart.value, usageEnd.value)) || []
-  } catch (e: any) {}
+    hourlyStats.value = (await GetUsageHourlyStats()) || []
+  } catch (e: any) {
+    hourlyStats.value = []
+  }
 }
 
 const usageTotal = computed(() => {
@@ -180,7 +206,6 @@ async function refreshUsage() {
 
 async function refreshUsageHistory() {
   try {
-    dailyStats.value = (await GetUsageDailyStats(7)) || []
     recentRecords.value = (await GetUsageRecentRecords(50)) || []
   } catch (e: any) {}
 }
@@ -247,7 +272,8 @@ function startStatsPolling() {
   stopStatsPolling()
   statsInterval = setInterval(() => {
     refreshUsage()
-  }, 2000)
+    loadUsageByRange(usageRange.value)
+  }, 5000)
   // Poll status to detect tray-initiated model switches
   statusInterval = setInterval(() => {
     refreshStatus()
@@ -312,16 +338,25 @@ function handleEditProvider(key: string) {
 async function handleClearToday() {
   try {
     await ClearUsageToday()
+    dailyStats.value = []
+    hourlyStats.value = []
+    modelUsageRows.value = []
     await refreshUsage()
     await refreshUsageHistory()
+    await loadUsageByRange(usageRange.value)
   } catch (e: any) {}
 }
 
 async function handleClearAll() {
   try {
     await ClearUsageAll()
+    dailyStats.value = []
+    hourlyStats.value = []
+    modelUsageRows.value = []
+    recentRecords.value = []
     await refreshUsage()
     await refreshUsageHistory()
+    await loadUsageByRange(usageRange.value)
   } catch (e: any) {}
 }
 
@@ -360,7 +395,7 @@ onMounted(async () => {
     await refreshUsage()
   } catch (e: any) { console.error('[App] refreshUsage failed:', e) }
   try {
-    await loadUsageByRange(7)
+    await loadUsageByRange(0)
   } catch (e: any) { console.error('[App] loadUsageByRange failed:', e) }
   if (status.value.running) {
     startStatsPolling()
@@ -387,11 +422,23 @@ function formatTime(ts: string): string {
   const d = new Date(ts)
   return d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
 }
-function barWidth(d: any): number {
+function maxBarLabel(): string {
+  const stats = usageRange.value === 0 ? hourlyStats.value : dailyStats.value || []
+  const max = Math.max(...stats.map((x: any) => x.input_tokens + x.output_tokens), 0)
+  return formatTokens(max)
+}
+function barHeight(d: any): number {
   const total = d.input_tokens + d.output_tokens
-  const stats = dailyStats.value || []
+  const stats = usageRange.value === 0 ? hourlyStats.value : dailyStats.value || []
   const max = Math.max(...stats.map((x: any) => x.input_tokens + x.output_tokens), 1)
-  return Math.max((total / max) * 100, 2)
+  return Math.max((total / max) * 100, 4)
+}
+function formatHourLabel(hour: number): string {
+  return String(hour).padStart(2, '0')
+}
+function formatDate(dateStr: string): string {
+  // "2026-05-20" -> "05/20" or "20"
+  return dateStr.slice(5).replace('-', '/')
 }
 function capClass(cap: string): string {
   const map: Record<string, string> = {
@@ -576,19 +623,39 @@ function capClass(cap: string): string {
             <button class="clear-btn clear-btn-danger" @click="handleClearAll">清除全部</button>
           </div>
 
-          <!-- Daily chart -->
+          <!-- Usage chart -->
           <div class="daily-chart-card">
-            <h3 class="card-title">日用量趋势</h3>
-            <div class="daily-bars">
-              <div v-for="d in dailyStats" :key="d.date" class="daily-bar-row">
-                <span class="daily-date">{{ d.date.slice(5) }}</span>
-                <div class="daily-bar-track">
-                  <div class="daily-bar-fill" :style="{ width: barWidth(d) + '%' }"></div>
-                </div>
-                <span class="daily-count">{{ formatTokens(d.input_tokens + d.output_tokens) }}</span>
-                <span class="daily-cost">&yen;{{ d.cost.toFixed(4) }}</span>
+            <h3 class="card-title">用量趋势</h3>
+            <div class="daily-chart">
+              <div class="chart-y-axis">
+                <span class="y-label">{{ maxBarLabel() }}</span>
               </div>
-              <div v-if="dailyStats.length === 0" class="no-data">暂无数据</div>
+              <div class="chart-area">
+                <!-- Hourly view (today) -->
+                <template v-if="usageRange === 0">
+                  <div v-for="h in hourlyStats" :key="h.hour" class="bar-col">
+                    <div class="bar-tooltip">&yen;{{ h.cost.toFixed(2) }}</div>
+                    <div class="bar-track">
+                      <div class="bar-fill" :style="{ height: barHeight(h) + '%' }"></div>
+                    </div>
+                    <span class="bar-label">{{ formatHourLabel(h.hour) }}</span>
+                    <span class="bar-tokens">{{ formatTokens(h.input_tokens + h.output_tokens) }}</span>
+                  </div>
+                  <div v-if="hourlyStats.filter(h => h.request_count > 0).length === 0" class="no-data">暂无数据</div>
+                </template>
+                <!-- Daily view (multi-day) -->
+                <template v-else>
+                  <div v-for="d in dailyStats" :key="d.date" class="bar-col">
+                    <div class="bar-tooltip">&yen;{{ d.cost.toFixed(2) }}</div>
+                    <div class="bar-track">
+                      <div class="bar-fill" :style="{ height: barHeight(d) + '%' }"></div>
+                    </div>
+                    <span class="bar-label">{{ formatDate(d.date) }}</span>
+                    <span class="bar-tokens">{{ formatTokens(d.input_tokens + d.output_tokens) }}</span>
+                  </div>
+                  <div v-if="dailyStats.length === 0" class="no-data">暂无数据</div>
+                </template>
+              </div>
             </div>
           </div>
 
@@ -818,54 +885,92 @@ function capClass(cap: string): string {
   margin-bottom: 12px;
 }
 
-.daily-bars {
+.daily-chart {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  min-height: 180px;
+}
+
+.chart-y-axis {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  justify-content: flex-end;
+  padding-bottom: 28px;
 }
 
-.daily-bar-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.daily-date {
-  font-size: 12px;
+.y-label {
+  font-size: 10px;
   color: var(--gray-400);
-  min-width: 40px;
-  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  writing-mode: vertical-lr;
+  transform: rotate(180deg);
 }
 
-.daily-bar-track {
+.chart-area {
   flex: 1;
-  height: 8px;
-  background: var(--gray-100);
-  border-radius: 4px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-around;
+  gap: 4px;
+  position: relative;
+  border-bottom: 1px solid var(--gray-200);
+  min-height: 160px;
+  padding-bottom: 0;
+}
+
+.bar-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
+  position: relative;
+  cursor: default;
+}
+
+.bar-tooltip {
+  font-size: 10px;
+  color: var(--gray-500);
+  opacity: 0;
+  transition: opacity 0.15s;
+  margin-bottom: 2px;
+  white-space: nowrap;
+}
+.bar-col:hover .bar-tooltip {
+  opacity: 1;
+}
+
+.bar-track {
+  width: 28px;
+  height: 130px;
+  background: var(--gray-50);
+  border-radius: 4px 4px 0 0;
+  display: flex;
+  align-items: flex-end;
   overflow: hidden;
 }
 
-.daily-bar-fill {
-  height: 100%;
-  background: linear-gradient(90deg, var(--purple-500), var(--purple-400));
-  border-radius: 4px;
-  transition: width 0.3s;
+.bar-fill {
+  width: 100%;
+  background: linear-gradient(180deg, var(--purple-500), var(--purple-300));
+  border-radius: 4px 4px 0 0;
+  transition: height 0.4s ease;
+  min-height: 3px;
 }
 
-.daily-count {
-  font-size: 12px;
-  color: var(--gray-600);
-  min-width: 50px;
-  text-align: right;
-  font-variant-numeric: tabular-nums;
+.bar-label {
+  font-size: 10px;
+  color: var(--gray-400);
+  margin-top: 6px;
+  white-space: nowrap;
 }
 
-.daily-cost {
-  font-size: 12px;
+.bar-tokens {
+  font-size: 10px;
   color: var(--gray-500);
-  min-width: 60px;
-  text-align: right;
-  font-variant-numeric: tabular-nums;
+  margin-top: 2px;
+  white-space: nowrap;
 }
 
 .no-data {

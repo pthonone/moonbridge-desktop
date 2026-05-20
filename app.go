@@ -290,6 +290,16 @@ func (a *App) StartMoonBridge() error {
 			a.usageStore.AddUsage(model, 0, 0, 0, 0)
 		}
 	})
+	a.retryProxy.SetResolveModel(func(alias string) string {
+		if a.config != nil {
+			for _, r := range a.config.Routes {
+				if r.Alias == alias {
+					return r.Model
+				}
+			}
+		}
+		return alias
+	})
 
 	return nil
 }
@@ -532,6 +542,14 @@ func (a *App) GetUsageDailyStats(days int) []backend.DailyUsageRow {
 		return nil
 	}
 	return a.usageStore.GetDailyStats(days)
+}
+
+// GetUsageHourlyStats returns today's usage grouped by hour (0-23).
+func (a *App) GetUsageHourlyStats() []backend.HourlyUsageRow {
+	if a.usageStore == nil {
+		return nil
+	}
+	return a.usageStore.GetHourlyStats()
 }
 
 // GetUsageByModel returns usage grouped by model for a date range.

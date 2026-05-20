@@ -9,6 +9,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -30,6 +32,7 @@ type RetryProxy struct {
 	running        bool
 	recordUsage    RecordUsageFunc
 	recordRequest  RecordRequestFunc
+	resolveModel   func(alias string) string // resolves route alias to actual model name
 }
 
 // NewRetryProxy creates a retry proxy that listens on listenPort
@@ -57,6 +60,13 @@ func (rp *RetryProxy) SetRecordRequest(fn RecordRequestFunc) {
 	rp.mu.Lock()
 	defer rp.mu.Unlock()
 	rp.recordRequest = fn
+}
+
+// SetResolveModel sets the function that maps route aliases to actual model names.
+func (rp *RetryProxy) SetResolveModel(fn func(alias string) string) {
+	rp.mu.Lock()
+	defer rp.mu.Unlock()
+	rp.resolveModel = fn
 }
 
 // Start begins listening for HTTP requests.
@@ -146,8 +156,12 @@ type SSEUsageExtractor struct {
 func (e *SSEUsageExtractor) recordUsage(rp *RetryProxy) {
 	rp.mu.Lock()
 	defer rp.mu.Unlock()
+	model := e.model
+	if rp.resolveModel != nil {
+		model = rp.resolveModel(e.model)
+	}
 	if rp.recordUsage != nil && (e.inputTokens > 0 || e.outputTokens > 0) {
-		rp.recordUsage(e.model, e.inputTokens, e.outputTokens, e.cacheRead, e.cacheWrite)
+		rp.recordUsage(model, e.inputTokens, e.outputTokens, e.cacheRead, e.cacheWrite)
 	}
 }
 
@@ -155,17 +169,25 @@ func (e *SSEUsageExtractor) recordUsage(rp *RetryProxy) {
 func (e *SSEUsageExtractor) recordPerRequest(rp *RetryProxy) {
 	rp.mu.Lock()
 	defer rp.mu.Unlock()
+	model := e.model
+	if rp.resolveModel != nil {
+		model = rp.resolveModel(e.model)
+	}
 	if rp.recordRequest != nil {
-		rp.recordRequest(e.model)
+		rp.recordRequest(model)
 	}
 }
 
 // parseAnthropicSSE parses Anthropic-style SSE events for usage data.
+// Checks for event type field and usage in both message_delta and message_stop events.
 func (e *SSEUsageExtractor) parseAnthropicSSE(data string) {
-	if !strings.Contains(data, "message_delta") {
+	isDelta := strings.Contains(data, `"message_delta"`) || strings.Contains(data, `"type":"message_delta"`)
+	isStop := strings.Contains(data, `"message_stop"`) || strings.Contains(data, `"type":"message_stop"`)
+	if !isDelta && !isStop {
 		return
 	}
 	var msg struct {
+		Type string `json:"type"`
 		Delta struct {
 			Usage *struct {
 				InputTokens              int `json:"input_tokens"`
@@ -196,6 +218,35 @@ func (e *SSEUsageExtractor) parseAnthropicSSE(data string) {
 	}
 }
 
+// parseOpenAIResponsesSSE parses OpenAI Responses API SSE events for usage data.
+// Usage appears in "response.completed" event with fields:
+// {"type":"response.completed","response":{"usage":{"input_tokens":N,"output_tokens":N,"input_tokens_details":{"cached_tokens":N}}}}
+func (e *SSEUsageExtractor) parseOpenAIResponsesSSE(data string) {
+	if !strings.Contains(data, `"response.completed"`) && !strings.Contains(data, `"type":"response.completed"`) {
+		return
+	}
+	var msg struct {
+		Response struct {
+			Usage *struct {
+				InputTokens           int `json:"input_tokens"`
+				OutputTokens          int `json:"output_tokens"`
+				TotalTokens           int `json:"total_tokens"`
+				InputTokensDetails    struct {
+					CachedTokens int `json:"cached_tokens"`
+				} `json:"input_tokens_details"`
+				OutputTokensDetails struct {
+					ReasoningTokens int `json:"reasoning_tokens"`
+				} `json:"output_tokens_details"`
+			} `json:"usage"`
+		} `json:"response"`
+	}
+	if err := json.Unmarshal([]byte(data), &msg); err == nil && msg.Response.Usage != nil {
+		e.inputTokens = msg.Response.Usage.InputTokens
+		e.outputTokens = msg.Response.Usage.OutputTokens
+		e.cacheRead = msg.Response.Usage.InputTokensDetails.CachedTokens
+	}
+}
+
 // parseOpenAISSE parses OpenAI-style SSE events for usage data.
 func (e *SSEUsageExtractor) parseOpenAISSE(data string) {
 	if data == "[DONE]" {
@@ -217,6 +268,53 @@ func (e *SSEUsageExtractor) parseOpenAISSE(data string) {
 	}
 }
 
+// sanitizeTools removes tools with empty names from the request body.
+// Codex sometimes sends tools with empty function.name, causing upstream 502.
+func sanitizeTools(originalBody []byte, toolsRaw json.RawMessage) []byte {
+	var tools []map[string]any
+	if err := json.Unmarshal(toolsRaw, &tools); err != nil {
+		return originalBody
+	}
+
+	filtered := make([]map[string]any, 0, len(tools))
+	for _, t := range tools {
+		name := getToolName(t)
+		if strings.TrimSpace(name) == "" {
+			continue
+		}
+		filtered = append(filtered, t)
+	}
+
+	if len(filtered) == len(tools) {
+		return originalBody
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(originalBody, &body); err != nil {
+		return originalBody
+	}
+	body["tools"] = filtered
+	result, err := json.Marshal(body)
+	if err != nil {
+		return originalBody
+	}
+	return result
+}
+
+// getToolName extracts the name from a tool object.
+// Handles both {"type":"function","function":{"name":"..."}} and {"type":"function","name":"..."}.
+func getToolName(t map[string]any) string {
+	if fn, ok := t["function"].(map[string]any); ok {
+		if name, _ := fn["name"].(string); name != "" {
+			return name
+		}
+	}
+	if name, ok := t["name"].(string); ok {
+		return name
+	}
+	return ""
+}
+
 func (rp *RetryProxy) handleRequest(w http.ResponseWriter, r *http.Request) {
 	// Buffer the request body so we can retry
 	var bodyBytes []byte
@@ -232,14 +330,21 @@ func (rp *RetryProxy) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	target := fmt.Sprintf("http://127.0.0.1:%d%s", rp.targetPort, r.URL.RequestURI())
 
-	// Extract model from request body
+	// Extract model from request body and sanitize tools
 	var modelName string
 	if len(bodyBytes) > 0 {
 		var reqBody struct {
-			Model string `json:"model"`
+			Model string          `json:"model"`
+			Tools json.RawMessage `json:"tools"`
 		}
-		if err := json.Unmarshal(bodyBytes, &reqBody); err == nil && reqBody.Model != "" {
-			modelName = reqBody.Model
+		if err := json.Unmarshal(bodyBytes, &reqBody); err == nil {
+			if reqBody.Model != "" {
+				modelName = reqBody.Model
+			}
+			// Sanitize tools: remove entries with empty names (fixes Codex empty tool bug)
+			if len(reqBody.Tools) > 0 {
+				bodyBytes = sanitizeTools(bodyBytes, reqBody.Tools)
+			}
 		}
 	}
 
@@ -308,6 +413,7 @@ func (rp *RetryProxy) handleRequest(w http.ResponseWriter, r *http.Request) {
 		scanner := bufio.NewScanner(lastResp.Body)
 		var eventBuf strings.Builder
 		eventStarted := false
+		var lastCompletedEvent string
 
 		for scanner.Scan() {
 			line := scanner.Text()
@@ -324,8 +430,12 @@ func (rp *RetryProxy) handleRequest(w http.ResponseWriter, r *http.Request) {
 			// Empty line = end of event
 			if line == "" && eventStarted {
 				data := eventBuf.String()
+				if strings.Contains(data, "response.completed") {
+					lastCompletedEvent = data
+				}
 				extractor.parseAnthropicSSE(data)
 				extractor.parseOpenAISSE(data)
+				extractor.parseOpenAIResponsesSSE(data)
 				eventBuf.Reset()
 				eventStarted = false
 			}
@@ -340,9 +450,32 @@ func (rp *RetryProxy) handleRequest(w http.ResponseWriter, r *http.Request) {
 		// Process any remaining event data
 		if eventStarted {
 			data := eventBuf.String()
+			if strings.Contains(data, "response.completed") {
+				lastCompletedEvent = data
+			}
 			extractor.parseAnthropicSSE(data)
 			extractor.parseOpenAISSE(data)
+			extractor.parseOpenAIResponsesSSE(data)
 		}
+
+		// Debug: write SSE parsing result to file
+		go func() {
+			logPath := filepath.Join(os.TempDir(), "moonbridge-sse-v2.log")
+			f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+			if err != nil {
+				return
+			}
+			defer f.Close()
+			fmt.Fprintf(f, "model=%s input=%d output=%d cacheRead=%d cacheWrite=%d\n",
+				extractor.model, extractor.inputTokens, extractor.outputTokens,
+				extractor.cacheRead, extractor.cacheWrite)
+			fmt.Fprintf(f, "\n--- response.completed event (first 1000 bytes) ---\n")
+			if lastCompletedEvent != "" {
+				fmt.Fprintf(f, "%s\n", lastCompletedEvent[:min(len(lastCompletedEvent), 1000)])
+			} else {
+				fmt.Fprintf(f, "(not found)\n")
+			}
+		}()
 
 		extractor.recordUsage(rp)
 		extractor.recordPerRequest(rp)
@@ -357,6 +490,13 @@ func (rp *RetryProxy) handleRequest(w http.ResponseWriter, r *http.Request) {
 		respBody = []byte{}
 	}
 
+	resolvedModel := modelName
+	rp.mu.Lock()
+	if rp.resolveModel != nil {
+		resolvedModel = rp.resolveModel(modelName)
+	}
+	rp.mu.Unlock()
+
 	if lastResp.StatusCode == 200 && strings.Contains(ct, "application/json") && len(respBody) > 0 {
 		// Try Anthropic-style first
 		var u responseUsage
@@ -364,7 +504,7 @@ func (rp *RetryProxy) handleRequest(w http.ResponseWriter, r *http.Request) {
 			rp.mu.Lock()
 			if rp.recordUsage != nil {
 				rp.recordUsage(
-					modelName,
+					resolvedModel,
 					u.Usage.InputTokens,
 					u.Usage.OutputTokens,
 					u.Usage.InputTokensDetails.CachedTokens,
@@ -379,7 +519,7 @@ func (rp *RetryProxy) handleRequest(w http.ResponseWriter, r *http.Request) {
 				rp.mu.Lock()
 				if rp.recordUsage != nil {
 					rp.recordUsage(
-						modelName,
+						resolvedModel,
 						o.Usage.PromptTokens,
 						o.Usage.CompletionTokens,
 						o.Usage.PromptTokensDetails.CachedTokens,
@@ -392,7 +532,7 @@ func (rp *RetryProxy) handleRequest(w http.ResponseWriter, r *http.Request) {
 		// Record per-request exactly once for successful response
 		rp.mu.Lock()
 		if rp.recordRequest != nil {
-			rp.recordRequest(modelName)
+			rp.recordRequest(resolvedModel)
 		}
 		rp.mu.Unlock()
 	}
