@@ -1,0 +1,9 @@
+build/bin
+node_modules
+frontend/dist
+*.exe
+*.bak
+frontend/wailsjs/
+data/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,95 @@
+:root {
+  --purple-500: #7C3AED;
+  --purple-600: #6D28D9;
+  --purple-400: #8B5CF6;
+  --purple-100: #EDE9FE;
+  --purple-50: #F5F3FF;
+  --gray-50: #F9FAFB;
+  --gray-100: #F3F4F6;
+  --gray-200: #E5E7EB;
+  --gray-300: #D1D5DB;
+  --gray-400: #9CA3AF;
+  --gray-500: #6B7280;
+  --gray-600: #4B5563;
+  --gray-700: #374151;
+  --gray-800: #1F2937;
+  --gray-900: #111827;
+  --green-500: #22C55E;
+  --green-100: #DCFCE7;
+  --red-500: #EF4444;
+  --red-100: #FEE2E2;
+  --amber-500: #F59E0B;
+  --amber-100: #FEF3C7;
+  --blue-500: #3B82F6;
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.05);
+  --shadow: 0 1px 3px rgba(0,0,0,0.1), 0 1px 2px rgba(0,0,0,0.06);
+  --shadow-md: 0 4px 6px -1px rgba(0,0,0,0.1), 0 2px 4px -2px rgba(0,0,0,0.1);
+  --shadow-lg: 0 10px 15px -3px rgba(0,0,0,0.1), 0 4px 6px -4px rgba(0,0,0,0.1);
+  --radius: 12px;
+  --radius-sm: 8px;
+  --radius-lg: 16px;
+
+  /* Capability badge colors */
+  --cap-vision-bg: #ECFEFF;
+  --cap-vision-text: #0891B2;
+  --cap-reasoning-bg: #FFF7ED;
+  --cap-reasoning-text: #EA580C;
+  --cap-coding-bg: #EFF6FF;
+  --cap-coding-text: #2563EB;
+  --cap-long-context-bg: #F5F3FF;
+  --cap-long-context-text: #7C3AED;
+  --cap-web-search-bg: #F0FDF9;
+  --cap-web-search-text: #0D9488;
+
+  /* Pricing tier colors */
+  --tier-free-bg: #DCFCE7;
+  --tier-free-text: #16A34A;
+  --tier-economy-bg: #FEF3C7;
+  --tier-economy-text: #D97706;
+  --tier-standard-bg: #EDE9FE;
+  --tier-standard-text: #7C3AED;
+  --tier-premium-bg: #FEE2E2;
+  --tier-premium-text: #DC2626;
+  --tier-ultra-bg: #FDF2F8;
+  --tier-ultra-text: #DB2777;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Nunito', Roboto, sans-serif;
+  background: #F9FAFB;
+  color: #1F2937;
+  margin: 0;
+  padding: 0;
+  -webkit-font-smoothing: antialiased;
+}
+
+#app {
+  height: 100%;
+  background: #F9FAFB;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--gray-300);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--gray-400);
+}
