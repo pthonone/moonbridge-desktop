@@ -261,3 +261,55 @@ func (cc *CodexConfig) findModelBySlug(models []ModelConfig, slug string) *Model
 func (cc *CodexConfig) defaultBaseInstructions(slug string) string {
 	return fmt.Sprintf("You are %s, a coding agent. You and the user share one workspace, and your job is to collaborate with them until their goal is genuinely handled.", slug)
 }
+
+// Reset removes the Moon Bridge entries from Codex config files.
+// If config.toml only contains moonbridge settings, it's deleted entirely.
+// models_catalog.json is always deleted.
+func (cc *CodexConfig) Reset() error {
+	// Remove models_catalog.json
+	catalogPath := filepath.Join(cc.configPath, "models_catalog.json")
+	_ = os.Remove(catalogPath)
+
+	// Restore config.toml by removing moonbridge sections
+	tomlPath := filepath.Join(cc.configPath, "config.toml")
+	data, err := os.ReadFile(tomlPath)
+	if err != nil {
+		return nil // File doesn't exist, nothing to do
+	}
+
+	lines := strings.Split(string(data), "\n")
+	var result []string
+	inMoonbridge := false
+	hasNonMoonbridgeContent := false
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "[model_providers.moonbridge]" {
+			inMoonbridge = true
+			continue
+		}
+		if inMoonbridge && strings.HasPrefix(trimmed, "[") {
+			inMoonbridge = false
+		}
+		if inMoonbridge {
+			continue // Skip moonbridge section
+		}
+		// Skip model-related lines that reference moonbridge
+		if strings.HasPrefix(trimmed, "model_provider = \"moonbridge\"") {
+			continue
+		}
+		result = append(result, line)
+		if trimmed != "" && !strings.HasPrefix(trimmed, "#") {
+			hasNonMoonbridgeContent = true
+		}
+	}
+
+	if hasNonMoonbridgeContent {
+		out := strings.Join(result, "\n")
+		out = strings.Trim(out, "\n")
+		return os.WriteFile(tomlPath, []byte(out), 0644)
+	}
+
+	// Only moonbridge content existed, delete the file
+	return os.Remove(tomlPath)
+}

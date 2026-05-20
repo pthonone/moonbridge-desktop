@@ -31,3 +31,5 @@ export const ClearUsageToday    = () => { assertGo(); return go.ClearUsageToday(
 export const ClearUsageAll      = () => { assertGo(); return go.ClearUsageAll() }
 export const AddUsage           = (a1: any, a2: any, a3: any, a4: any, a5: any) => { assertGo(); return go.AddUsage(a1, a2, a3, a4, a5) }
 export const ClearUsageDateRange = (a1: any, a2: any) => { assertGo(); return go.ClearUsageDateRange(a1, a2) }
+export const IsCodexEnabled     = () => { assertGo(); return go.IsCodexEnabled() }
+export const SetCodexEnabled    = (a1: any) => { assertGo(); return go.SetCodexEnabled(a1) }

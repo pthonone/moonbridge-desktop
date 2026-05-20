@@ -725,8 +725,14 @@ func (a *App) SetLogLevel(level string) error {
 
 // ----- Codex Integration -----
 
+// codexEnabled tracks whether Moon Bridge should manage Codex config.
+var codexEnabled = true
+
 // SyncCodexConfig syncs MoonBridge config to Codex CLI configuration.
 func (a *App) SyncCodexConfig() error {
+	if !codexEnabled {
+		return fmt.Errorf("Codex 集成已关闭")
+	}
 	if a.codexConfig == nil {
 		var err error
 		a.codexConfig, err = backend.NewCodexConfig()
@@ -752,8 +758,32 @@ func (a *App) IsCodexInstalled() bool {
 	return a.codexConfig != nil && a.codexConfig.IsInstalled()
 }
 
+// IsCodexEnabled returns whether Codex integration is currently enabled.
+func (a *App) IsCodexEnabled() bool {
+	return codexEnabled
+}
+
+// SetCodexEnabled enables or disables Codex integration.
+// When disabling, it removes Moon Bridge entries from Codex config files.
+func (a *App) SetCodexEnabled(enabled bool) error {
+	codexEnabled = enabled
+	if !enabled {
+		if a.codexConfig != nil {
+			if err := a.codexConfig.Reset(); err != nil {
+				return fmt.Errorf("reset codex config: %w", err)
+			}
+		}
+		return nil
+	}
+	// Re-enable: sync current config
+	return a.SyncCodexConfig()
+}
+
 // syncCodexConfig silently syncs Codex config (no error to frontend).
 func (a *App) syncCodexConfig() {
+	if !codexEnabled {
+		return
+	}
 	if a.codexConfig != nil && a.codexConfig.IsInstalled() {
 		_ = a.codexConfig.Sync(a.config)
 	}

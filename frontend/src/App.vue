@@ -5,7 +5,7 @@ import LogViewer from './components/LogViewer.vue'
 import ProviderEditor from './components/ProviderEditor.vue'
 import ModelCard from './components/ModelCard.vue'
 import { EventsOn, EventsOff } from '@wailsjs/runtime/runtime'
-import { GetStatus, StartMoonBridge, StopMoonBridge, GetConfig, GetUsageStats, GetProviderPresets, ListModels, ListProviders, GetUsageDailyStats, GetUsageRecentRecords, GetUsageByModel, ClearUsageToday, ClearUsageAll } from '@wailsjs/go/main/App'
+import { GetStatus, StartMoonBridge, StopMoonBridge, GetConfig, GetUsageStats, GetProviderPresets, ListModels, ListProviders, GetUsageDailyStats, GetUsageRecentRecords, GetUsageByModel, ClearUsageToday, ClearUsageAll, IsCodexEnabled, SetCodexEnabled } from '@wailsjs/go/main/App'
 
 interface MBStatus { running: boolean; port: number; current_route: string; error: string }
 interface DesktopConfig { port: number; log_level: string; providers: any[]; models: any[]; routes: any[]; default_route: string; max_tokens: number; metrics_enabled: boolean }
@@ -25,6 +25,8 @@ const selectedPreset = ref<any>(null)
 const editingProviderKey = ref<string | null>(null)
 const statusError = ref('')
 const activeTab = ref('models')
+const codexEnabled = ref(true)
+const codexInstalled = ref(false)
 
 // Models tab state
 const modelSearch = ref('')
@@ -279,6 +281,18 @@ function handleCancelEditor() {
   editingProviderKey.value = null
 }
 
+async function handleCodexToggle(e: Event) {
+  const checked = (e.target as HTMLInputElement).checked
+  try {
+    await SetCodexEnabled(checked)
+    codexEnabled.value = checked
+    statusError.value = checked ? 'Codex 集成已开启' : 'Codex 集成已关闭，配置已还原'
+    setTimeout(() => { statusError.value = '' }, 3000)
+  } catch (err: any) {
+    statusError.value = err.message || String(err)
+  }
+}
+
 function handleEditProvider(key: string) {
   const existing = providers.value.find(p => p.key === key)
   if (existing) {
@@ -328,6 +342,14 @@ onMounted(async () => {
   } catch (e: any) {
     console.error('Failed to load presets:', e)
   }
+  // Load Codex state
+  try {
+    const { IsCodexInstalled } = await import('@wailsjs/go/main/App')
+    codexInstalled.value = await IsCodexInstalled()
+  } catch (e: any) { console.error('[App] check codex failed:', e) }
+  try {
+    codexEnabled.value = await IsCodexEnabled()
+  } catch (e: any) { console.error('[App] get codex enabled failed:', e) }
   try {
     await refreshStatus()
   } catch (e: any) { console.error('[App] refreshStatus failed:', e) }
@@ -417,6 +439,13 @@ function capClass(cap: string): string {
                 <svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>
                 {{ loading ? '停止中...' : '停止' }}
               </button>
+              <div class="codex-toggle" :title="codexInstalled ? (codexEnabled ? 'Codex 集成已开启' : 'Codex 集成已关闭') : '未检测到 Codex CLI'">
+                <label class="toggle-switch">
+                  <input type="checkbox" :checked="codexEnabled" :disabled="!codexInstalled || loading" @change="handleCodexToggle" />
+                  <span class="toggle-slider"></span>
+                </label>
+                <span class="toggle-label">{{ codexInstalled ? 'Codex' : 'Codex 未安装' }}</span>
+              </div>
             </div>
           </div>
 
@@ -958,8 +987,50 @@ function capClass(cap: string): string {
 
 .status-actions {
   display: flex;
+  align-items: center;
   gap: 8px;
 }
+
+.codex-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 10px;
+  background: var(--gray-800);
+  font-size: 12px;
+  color: var(--gray-400);
+}
+.toggle-switch {
+  position: relative;
+  display: inline-block;
+  width: 32px;
+  height: 18px;
+}
+.toggle-switch input { opacity: 0; width: 0; height: 0; }
+.toggle-slider {
+  position: absolute;
+  cursor: pointer;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: var(--gray-600);
+  border-radius: 18px;
+  transition: 0.2s;
+}
+.toggle-slider::before {
+  content: "";
+  position: absolute;
+  height: 14px;
+  width: 14px;
+  left: 2px;
+  bottom: 2px;
+  background: white;
+  border-radius: 50%;
+  transition: 0.2s;
+}
+.toggle-switch input:checked + .toggle-slider { background: var(--purple-500); }
+.toggle-switch input:checked + .toggle-slider::before { transform: translateX(14px); }
+.toggle-switch input:disabled + .toggle-slider { opacity: 0.4; cursor: not-allowed; }
+.toggle-label { white-space: nowrap; font-weight: 500; }
 
 .btn {
   display: flex;
