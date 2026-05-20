@@ -44,7 +44,12 @@ func (a *App) startup(ctx context.Context) {
 		panic(err)
 	}
 
-	a.codexConfig, _ = backend.NewCodexConfig()
+	codexCfg, codexErr := backend.NewCodexConfig()
+	if codexErr != nil {
+		fmt.Printf("[Codex] init failed: %v\n", codexErr)
+	} else {
+		a.codexConfig = codexCfg
+	}
 
 	a.config, err = a.configMgr.LoadConfig()
 	if err != nil {
@@ -59,8 +64,14 @@ func (a *App) startup(ctx context.Context) {
 	a.syncRoutes()
 	_ = a.configMgr.SaveConfig(a.config)
 
-	// Sync Codex config if available
-	a.syncCodexConfig()
+	// Sync Codex config on startup if enabled and installed
+	if codexEnabled && a.codexConfig != nil && a.codexConfig.IsInstalled() {
+		if err := a.codexConfig.Sync(a.config); err != nil {
+			fmt.Printf("[Codex] startup sync failed: %v\n", err)
+		} else {
+			fmt.Println("[Codex] config synced on startup")
+		}
+	}
 
 	// Initialize usage store for historical queries (even before bridge starts)
 	dataDir := a.configMgr.DataDir()
