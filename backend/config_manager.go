@@ -191,7 +191,7 @@ func (cm *ConfigManager) defaultConfig() *DesktopConfig {
 			},
 		},
 		Routes: []RouteConfig{
-			{Alias: "moonbridge", Model: "deepseek-v4-pro", Provider: "deepseek"},
+			{Alias: "moonbridge", Model: "deepseek-v4-flash", Provider: "deepseek"},
 		},
 		DefaultRoute:   "moonbridge",
 		MaxTokens:      65536,
