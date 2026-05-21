@@ -312,6 +312,12 @@ func (a *App) StartMoonBridge() error {
 		backend.AppLogger.Printf("[ResolveModel] %s -> %s (no route, returning alias)", alias, alias)
 		return alias
 	})
+	a.retryProxy.SetGetCurrentModel(func() string {
+		if a.config != nil {
+			return a.config.DefaultRoute
+		}
+		return ""
+	})
 
 	return nil
 }

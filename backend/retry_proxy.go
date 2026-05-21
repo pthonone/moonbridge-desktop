@@ -23,15 +23,16 @@ type RecordRequestFunc func(model string)
 
 // RetryProxy is an HTTP reverse proxy that automatically retries 502 errors.
 type RetryProxy struct {
-	mu             sync.Mutex
-	listenPort     int
-	targetPort     int
-	maxRetries     int
-	server         *http.Server
-	running        bool
-	recordUsage    RecordUsageFunc
-	recordRequest  RecordRequestFunc
-	resolveModel   func(alias string) string // resolves route alias to actual model name
+	mu              sync.Mutex
+	listenPort      int
+	targetPort      int
+	maxRetries      int
+	server          *http.Server
+	running         bool
+	recordUsage     RecordUsageFunc
+	recordRequest   RecordRequestFunc
+	resolveModel    func(alias string) string    // resolves route alias to actual model name
+	getCurrentModel func() string                // returns the user's currently selected model alias
 }
 
 // NewRetryProxy creates a retry proxy that listens on listenPort
@@ -66,6 +67,13 @@ func (rp *RetryProxy) SetResolveModel(fn func(alias string) string) {
 	rp.mu.Lock()
 	defer rp.mu.Unlock()
 	rp.resolveModel = fn
+}
+
+// SetGetCurrentModel sets the function that returns the user's currently selected model.
+func (rp *RetryProxy) SetGetCurrentModel(fn func() string) {
+	rp.mu.Lock()
+	defer rp.mu.Unlock()
+	rp.getCurrentModel = fn
 }
 
 // Start begins listening for HTTP requests.
@@ -386,6 +394,26 @@ func (rp *RetryProxy) handleRequest(w http.ResponseWriter, r *http.Request) {
 			// Sanitize tools: remove entries with empty names (fixes Codex empty tool bug)
 			if len(reqBody.Tools) > 0 {
 				bodyBytes = sanitizeTools(bodyBytes, reqBody.Tools)
+			}
+		}
+	}
+
+	// Rewrite request body model to user's currently selected model.
+	// This ensures MoonBridge uses the correct model even if Codex has stale config.
+	rp.mu.Lock()
+	currentModel := rp.getCurrentModel
+	rp.mu.Unlock()
+	if currentModel != nil {
+		selected := currentModel()
+		if selected != "" && modelName != selected {
+			AppLogger.Printf("[ModelRewrite] request model=%s, rewriting to selected=%s", modelName, selected)
+			var body map[string]any
+			if err := json.Unmarshal(bodyBytes, &body); err == nil {
+				body["model"] = selected
+				if rewritten, err := json.Marshal(body); err == nil {
+					bodyBytes = rewritten
+					modelName = selected
+				}
 			}
 		}
 	}
