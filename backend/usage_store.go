@@ -55,6 +55,9 @@ func NewUsageStore(dataDir string, getPricing func(string) *ModelPricing) (*Usag
 
 // AddUsage records a single request's usage.
 func (us *UsageStore) AddUsage(model string, inputTokens, outputTokens, cacheRead, cacheWrite int) {
+	if model == "" {
+		return
+	}
 	cost := us.calcCost(model, inputTokens, outputTokens, cacheRead, cacheWrite)
 	_, _ = us.db.Exec(
 		"INSERT INTO usage_records (model, input_tokens, output_tokens, cache_read, cache_write, cost) VALUES (?, ?, ?, ?, ?, ?)",

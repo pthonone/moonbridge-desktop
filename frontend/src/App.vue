@@ -176,6 +176,10 @@ const usageTotal = computed(() => {
   return { input, output, cacheRead, cacheWrite, cost, requests }
 })
 
+const filteredModelUsageRows = computed(() => {
+  return modelUsageRows.value.filter(r => r.model && r.model.trim() !== '')
+})
+
 let statsInterval: any = null
 let statusInterval: any = null
 
@@ -436,6 +440,12 @@ function barHeight(d: any): number {
 function formatHourLabel(hour: number): string {
   return String(hour).padStart(2, '0')
 }
+function barHeightForData(d: any): number {
+  const data = hourlyStats.value.filter(x => x.request_count > 0)
+  const total = d.input_tokens + d.output_tokens
+  const max = Math.max(...data.map((x: any) => x.input_tokens + x.output_tokens), 1)
+  return Math.max((total / max) * 100, 8)
+}
 function formatDate(dateStr: string): string {
   // "2026-05-20" -> "05/20" or "20"
   return dateStr.slice(5).replace('-', '/')
@@ -633,10 +643,10 @@ function capClass(cap: string): string {
               <div class="chart-area">
                 <!-- Hourly view (today) -->
                 <template v-if="usageRange === 0">
-                  <div v-for="h in hourlyStats" :key="h.hour" class="bar-col">
+                  <div v-for="h in hourlyStats.filter(x => x.request_count > 0)" :key="h.hour" class="bar-col">
                     <div class="bar-tooltip">&yen;{{ h.cost.toFixed(2) }}</div>
                     <div class="bar-track">
-                      <div class="bar-fill" :style="{ height: barHeight(h) + '%' }"></div>
+                      <div class="bar-fill" :style="{ height: barHeightForData(h) + '%' }"></div>
                     </div>
                     <span class="bar-label">{{ formatHourLabel(h.hour) }}</span>
                     <span class="bar-tokens">{{ formatTokens(h.input_tokens + h.output_tokens) }}</span>
@@ -674,7 +684,7 @@ function capClass(cap: string): string {
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="r in modelUsageRows" :key="r.model">
+                <tr v-for="r in filteredModelUsageRows" :key="r.model">
                   <td><span class="model-badge">{{ r.model }}</span></td>
                   <td>{{ r.request_count || 0 }}</td>
                   <td>{{ formatTokens(r.input_tokens || 0) }}</td>
@@ -682,7 +692,7 @@ function capClass(cap: string): string {
                   <td>{{ formatTokens((r.cache_read || 0) + (r.cache_write || 0)) }}</td>
                   <td class="cost-cell">&yen;{{ (r.cost || 0).toFixed(4) }}</td>
                 </tr>
-                <tr v-if="modelUsageRows.length === 0">
+                <tr v-if="filteredModelUsageRows.length === 0">
                   <td colspan="6" class="no-data-cell">暂无用量数据</td>
                 </tr>
               </tbody>

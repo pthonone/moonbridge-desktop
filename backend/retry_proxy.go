@@ -160,6 +160,9 @@ func (e *SSEUsageExtractor) recordUsage(rp *RetryProxy) {
 	if rp.resolveModel != nil {
 		model = rp.resolveModel(e.model)
 	}
+	if model == "" {
+		return
+	}
 	if rp.recordUsage != nil && (e.inputTokens > 0 || e.outputTokens > 0) {
 		rp.recordUsage(model, e.inputTokens, e.outputTokens, e.cacheRead, e.cacheWrite)
 	}
@@ -172,6 +175,9 @@ func (e *SSEUsageExtractor) recordPerRequest(rp *RetryProxy) {
 	model := e.model
 	if rp.resolveModel != nil {
 		model = rp.resolveModel(e.model)
+	}
+	if model == "" {
+		return
 	}
 	if rp.recordRequest != nil {
 		rp.recordRequest(model)

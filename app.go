@@ -295,12 +295,14 @@ func (a *App) StartMoonBridge() error {
 		if a.config != nil {
 			for _, r := range a.config.Routes {
 				if r.Alias == alias {
-					log.Printf("[ResolveModel] %s -> %s", alias, r.Model)
-					return r.Model
+					resolved := r.Model
+					log.Printf("[ResolveModel] %s -> %s", alias, resolved)
+					return resolved
 				}
 			}
 		}
-		log.Printf("[ResolveModel] %s -> %s (no route found, returning alias)", alias, alias)
+		// No route found — use the alias as-is (it's likely the actual model name)
+		log.Printf("[ResolveModel] %s -> %s (no route, returning alias)", alias, alias)
 		return alias
 	})
 
@@ -398,45 +400,47 @@ func (a *App) AddProvider(p backend.ProviderConfig) error {
 	return nil
 }
 
-// ensureModelsFromOffers syncs Models to match all provider offers.
-// Adds new models and removes models that no longer exist in any offer.
+// ensureModelsFromOffers rebuilds Models from all provider offers,
+// preserving context_window and other user-edited fields for existing models.
 func (a *App) ensureModelsFromOffers() {
-	// Collect all model slugs currently offered
-	offered := make(map[string]bool)
+	// Build offer map: model slug -> first matching offer
+	type offerInfo struct {
+		offer backend.OfferConfig
+		providerKey string
+	}
+	offerMap := make(map[string]offerInfo)
 	for _, p := range a.config.Providers {
 		for _, o := range p.Offers {
-			offered[o.Model] = true
-		}
-	}
-
-	// Keep existing models that are still offered, update series/capabilities
-	kept := make([]backend.ModelConfig, 0, len(a.config.Models))
-	for _, m := range a.config.Models {
-		if offered[m.Slug] {
-			// Update series/capabilities from the first matching offer
-			for _, p := range a.config.Providers {
-				for _, o := range p.Offers {
-					if o.Model == m.Slug {
-						if o.Series != "" {
-							m.Series = o.Series
-						}
-						if len(o.Capabilities) > 0 {
-							m.Capabilities = o.Capabilities
-						}
-						goto nextModel
-					}
-				}
+			if _, exists := offerMap[o.Model]; !exists {
+				offerMap[o.Model] = offerInfo{offer: o, providerKey: p.Key}
 			}
-		nextModel:
-			kept = append(kept, m)
-			delete(offered, m.Slug)
 		}
 	}
 
-	// Add remaining offered models that don't have entries yet
+	// Build new model list from offers, preserving existing model data where possible
+	existingMap := make(map[string]backend.ModelConfig)
+	for _, m := range a.config.Models {
+		existingMap[m.Slug] = m
+	}
+
+	var kept []backend.ModelConfig
+	// Track order: maintain existing order for models still in offers, append new ones
+	seenOrder := make(map[string]bool)
+	// First pass: existing models still offered (preserve order)
+	for _, m := range a.config.Models {
+		if info, ok := offerMap[m.Slug]; ok {
+			o := info.offer
+			// Update all fields from offer
+			m.Series = o.Series
+			m.Capabilities = o.Capabilities
+			kept = append(kept, m)
+			seenOrder[m.Slug] = true
+		}
+	}
+	// Second pass: new models not yet in config
 	for _, p := range a.config.Providers {
 		for _, o := range p.Offers {
-			if !offered[o.Model] {
+			if _, exists := seenOrder[o.Model]; exists {
 				continue
 			}
 			caps := o.Capabilities
@@ -446,16 +450,20 @@ func (a *App) ensureModelsFromOffers() {
 			} else if series == "" {
 				_, series = inferModelMetadata(o.Model, p.Key)
 			}
+			displayName := o.Model
+			if o.Series != "" {
+				displayName = o.Series
+			}
 			kept = append(kept, backend.ModelConfig{
 				Slug:            o.Model,
-				DisplayName:     o.Model,
+				DisplayName:     displayName,
 				ContextWindow:   1000000,
 				MaxOutputTokens: 65536,
 				Capabilities:    caps,
 				Series:          series,
 				Extensions:      map[string]bool{},
 			})
-			delete(offered, o.Model)
+			seenOrder[o.Model] = true
 		}
 	}
 	a.config.Models = kept
