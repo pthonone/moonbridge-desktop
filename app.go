@@ -4,6 +4,7 @@ import (
 	"context"
 	"embed"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -294,10 +295,12 @@ func (a *App) StartMoonBridge() error {
 		if a.config != nil {
 			for _, r := range a.config.Routes {
 				if r.Alias == alias {
+					log.Printf("[ResolveModel] %s -> %s", alias, r.Model)
 					return r.Model
 				}
 			}
 		}
+		log.Printf("[ResolveModel] %s -> %s (no route found, returning alias)", alias, alias)
 		return alias
 	})
 
@@ -499,6 +502,7 @@ func (a *App) DeleteProvider(key string) error {
 
 // SwitchModel changes the active route to use a different model.
 func (a *App) SwitchModel(routeAlias string) error {
+	log.Printf("[SwitchModel] switching to: %s", routeAlias)
 	if err := a.ensureConfigLoaded(); err != nil {
 		return err
 	}
@@ -507,6 +511,7 @@ func (a *App) SwitchModel(routeAlias string) error {
 	for i, r := range a.config.Routes {
 		if r.Alias == "moonbridge" {
 			a.config.Routes[i].Model = routeAlias
+			log.Printf("[SwitchModel] updated moonbridge route Model=%s", routeAlias)
 			break
 		}
 	}
@@ -517,6 +522,7 @@ func (a *App) SwitchModel(routeAlias string) error {
 		if r.Alias == routeAlias {
 			a.config.Routes[i].Model = routeAlias
 			updated = true
+			log.Printf("[SwitchModel] updated existing route %s", routeAlias)
 			break
 		}
 	}
@@ -526,9 +532,11 @@ func (a *App) SwitchModel(routeAlias string) error {
 			Model:    routeAlias,
 			Provider: "deepseek",
 		})
+		log.Printf("[SwitchModel] created new route %s", routeAlias)
 	}
 
 	a.config.DefaultRoute = routeAlias
+	log.Printf("[SwitchModel] DefaultRoute=%s, routes=%d", routeAlias, len(a.config.Routes))
 	if err := a.configMgr.SaveConfig(a.config); err != nil {
 		return fmt.Errorf("save config: %w", err)
 	}
