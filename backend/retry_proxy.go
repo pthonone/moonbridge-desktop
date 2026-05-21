@@ -159,6 +159,11 @@ type responseUsageResponses struct {
 	} `json:"usage"`
 }
 
+// responseModel extracts the actual model from upstream responses.
+type responseModel struct {
+	Model string `json:"model"`
+}
+
 // SSEUsageExtractor parses SSE stream events to extract usage data.
 type SSEUsageExtractor struct {
 	inputTokens  int
@@ -200,8 +205,20 @@ func (e *SSEUsageExtractor) recordPerRequest(rp *RetryProxy) {
 }
 
 // parseAnthropicSSE parses Anthropic-style SSE events for usage data.
-// Checks for event type field and usage in both message_delta and message_stop events.
+// Extracts model from message_start events, usage from message_delta/message_stop.
 func (e *SSEUsageExtractor) parseAnthropicSSE(data string) {
+	// Extract model from message_start
+	if strings.Contains(data, `"message_start"`) || strings.Contains(data, `"type":"message_start"`) {
+		var msg struct {
+			Message struct {
+				Model string `json:"model"`
+			} `json:"message"`
+		}
+		if err := json.Unmarshal([]byte(data), &msg); err == nil && msg.Message.Model != "" {
+			e.model = msg.Message.Model
+		}
+	}
+
 	isDelta := strings.Contains(data, `"message_delta"`) || strings.Contains(data, `"type":"message_delta"`)
 	isStop := strings.Contains(data, `"message_stop"`) || strings.Contains(data, `"type":"message_stop"`)
 	if !isDelta && !isStop {
@@ -248,6 +265,7 @@ func (e *SSEUsageExtractor) parseOpenAIResponsesSSE(data string) {
 	}
 	var msg struct {
 		Response struct {
+			Model string `json:"model"`
 			Usage *struct {
 				InputTokens           int `json:"input_tokens"`
 				OutputTokens          int `json:"output_tokens"`
@@ -262,6 +280,9 @@ func (e *SSEUsageExtractor) parseOpenAIResponsesSSE(data string) {
 		} `json:"response"`
 	}
 	if err := json.Unmarshal([]byte(data), &msg); err == nil && msg.Response.Usage != nil {
+		if msg.Response.Model != "" {
+			e.model = msg.Response.Model
+		}
 		e.inputTokens = msg.Response.Usage.InputTokens
 		e.outputTokens = msg.Response.Usage.OutputTokens
 		e.cacheRead = msg.Response.Usage.InputTokensDetails.CachedTokens
@@ -511,10 +532,19 @@ func (rp *RetryProxy) handleRequest(w http.ResponseWriter, r *http.Request) {
 		respBody = []byte{}
 	}
 
-	resolvedModel := modelName
+	// Extract actual model from upstream response (request body model may be stale)
+	upstreamModel := modelName
+	if len(respBody) > 0 {
+		var rm responseModel
+		if err := json.Unmarshal(respBody, &rm); err == nil && rm.Model != "" {
+			upstreamModel = rm.Model
+		}
+	}
+
+	resolvedModel := upstreamModel
 	rp.mu.Lock()
 	if rp.resolveModel != nil {
-		resolvedModel = rp.resolveModel(modelName)
+		resolvedModel = rp.resolveModel(upstreamModel)
 	}
 	rp.mu.Unlock()
 
@@ -522,19 +552,31 @@ func (rp *RetryProxy) handleRequest(w http.ResponseWriter, r *http.Request) {
 		// Try OpenAI Responses API first (MoonBridge /v1/responses)
 		var r responseUsageResponses
 		if err := json.Unmarshal(respBody, &r); err == nil && r.Usage.InputTokens > 0 {
+			// Use response model if we got one, fall back to resolvedModel
+			recModel := resolvedModel
+			if r.Model != "" {
+				rp.mu.Lock()
+				if rp.resolveModel != nil {
+					recModel = rp.resolveModel(r.Model)
+				} else {
+					recModel = r.Model
+				}
+				rp.mu.Unlock()
+			}
 			AppLogger.Printf("[UsageRecord] Responses API: model=%s input=%d output=%d cacheRead=%d cacheWrite=%d",
-				resolvedModel, r.Usage.InputTokens, r.Usage.OutputTokens, r.Usage.InputTokensDetails.CachedTokens, 0)
+				recModel, r.Usage.InputTokens, r.Usage.OutputTokens, r.Usage.InputTokensDetails.CachedTokens, 0)
 			rp.mu.Lock()
 			if rp.recordUsage != nil {
 				rp.recordUsage(
-					resolvedModel,
+					recModel,
 					r.Usage.InputTokens,
 					r.Usage.OutputTokens,
 					r.Usage.InputTokensDetails.CachedTokens,
 					0,
 				)
-			} else {
-				AppLogger.Printf("[UsageRecord] recordUsage callback is nil!")
+			}
+			if rp.recordRequest != nil {
+				rp.recordRequest(recModel)
 			}
 			rp.mu.Unlock()
 		} else {
@@ -552,8 +594,9 @@ func (rp *RetryProxy) handleRequest(w http.ResponseWriter, r *http.Request) {
 						u.Usage.InputTokensDetails.CachedTokens,
 						u.Usage.CacheCreationInputTokens,
 					)
-				} else {
-					AppLogger.Printf("[UsageRecord] recordUsage callback is nil!")
+				}
+				if rp.recordRequest != nil {
+					rp.recordRequest(resolvedModel)
 				}
 				rp.mu.Unlock()
 			} else {
@@ -571,21 +614,22 @@ func (rp *RetryProxy) handleRequest(w http.ResponseWriter, r *http.Request) {
 							o.Usage.PromptTokensDetails.CachedTokens,
 							0,
 						)
-					} else {
-						AppLogger.Printf("[UsageRecord] recordUsage callback is nil!")
+					}
+					if rp.recordRequest != nil {
+						rp.recordRequest(resolvedModel)
 					}
 					rp.mu.Unlock()
 				} else {
-					AppLogger.Printf("[UsageRecord] No usage data found in response")
+					// Usage parsing failed, but still record per-request with resolved model
+					AppLogger.Printf("[UsageRecord] No usage data extracted, recording per-request: model=%s", resolvedModel)
+					rp.mu.Lock()
+					if rp.recordRequest != nil {
+						rp.recordRequest(resolvedModel)
+					}
+					rp.mu.Unlock()
 				}
 			}
 		}
-		// Record per-request exactly once for successful response
-		rp.mu.Lock()
-		if rp.recordRequest != nil {
-			rp.recordRequest(resolvedModel)
-		}
-		rp.mu.Unlock()
 	} else {
 		AppLogger.Printf("[UsageRecord] Skipped: status=%d ct=%s bodyLen=%d", lastResp.StatusCode, ct, len(respBody))
 	}
