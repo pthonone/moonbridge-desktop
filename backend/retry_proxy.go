@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -90,7 +89,7 @@ func (rp *RetryProxy) Start() error {
 
 	go func() {
 		if err := rp.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Printf("[RetryProxy] server error: %v", err)
+			AppLogger.Printf("[RetryProxy] server error: %v", err)
 		}
 		rp.mu.Lock()
 		rp.running = false
@@ -523,7 +522,7 @@ func (rp *RetryProxy) handleRequest(w http.ResponseWriter, r *http.Request) {
 		// Try OpenAI Responses API first (MoonBridge /v1/responses)
 		var r responseUsageResponses
 		if err := json.Unmarshal(respBody, &r); err == nil && r.Usage.InputTokens > 0 {
-			log.Printf("[UsageRecord] Responses API: model=%s input=%d output=%d cacheRead=%d cacheWrite=%d",
+			AppLogger.Printf("[UsageRecord] Responses API: model=%s input=%d output=%d cacheRead=%d cacheWrite=%d",
 				resolvedModel, r.Usage.InputTokens, r.Usage.OutputTokens, r.Usage.InputTokensDetails.CachedTokens, 0)
 			rp.mu.Lock()
 			if rp.recordUsage != nil {
@@ -535,14 +534,14 @@ func (rp *RetryProxy) handleRequest(w http.ResponseWriter, r *http.Request) {
 					0,
 				)
 			} else {
-				log.Printf("[UsageRecord] recordUsage callback is nil!")
+				AppLogger.Printf("[UsageRecord] recordUsage callback is nil!")
 			}
 			rp.mu.Unlock()
 		} else {
 			// Try Anthropic-style
 			var u responseUsage
 			if err := json.Unmarshal(respBody, &u); err == nil && u.Usage.InputTokens > 0 {
-				log.Printf("[UsageRecord] Anthropic path: model=%s input=%d output=%d cacheRead=%d cacheWrite=%d",
+				AppLogger.Printf("[UsageRecord] Anthropic path: model=%s input=%d output=%d cacheRead=%d cacheWrite=%d",
 					resolvedModel, u.Usage.InputTokens, u.Usage.OutputTokens, u.Usage.InputTokensDetails.CachedTokens, u.Usage.CacheCreationInputTokens)
 				rp.mu.Lock()
 				if rp.recordUsage != nil {
@@ -554,14 +553,14 @@ func (rp *RetryProxy) handleRequest(w http.ResponseWriter, r *http.Request) {
 						u.Usage.CacheCreationInputTokens,
 					)
 				} else {
-					log.Printf("[UsageRecord] recordUsage callback is nil!")
+					AppLogger.Printf("[UsageRecord] recordUsage callback is nil!")
 				}
 				rp.mu.Unlock()
 			} else {
 				// Fallback: OpenAI-style
 				var o responseUsageOpenAI
 				if err := json.Unmarshal(respBody, &o); err == nil && o.Usage.PromptTokens > 0 {
-					log.Printf("[UsageRecord] OpenAI path: model=%s prompt=%d completion=%d",
+					AppLogger.Printf("[UsageRecord] OpenAI path: model=%s prompt=%d completion=%d",
 						resolvedModel, o.Usage.PromptTokens, o.Usage.CompletionTokens)
 					rp.mu.Lock()
 					if rp.recordUsage != nil {
@@ -573,11 +572,11 @@ func (rp *RetryProxy) handleRequest(w http.ResponseWriter, r *http.Request) {
 							0,
 						)
 					} else {
-						log.Printf("[UsageRecord] recordUsage callback is nil!")
+						AppLogger.Printf("[UsageRecord] recordUsage callback is nil!")
 					}
 					rp.mu.Unlock()
 				} else {
-					log.Printf("[UsageRecord] No usage data found in response")
+					AppLogger.Printf("[UsageRecord] No usage data found in response")
 				}
 			}
 		}
@@ -588,7 +587,7 @@ func (rp *RetryProxy) handleRequest(w http.ResponseWriter, r *http.Request) {
 		}
 		rp.mu.Unlock()
 	} else {
-		log.Printf("[UsageRecord] Skipped: status=%d ct=%s bodyLen=%d", lastResp.StatusCode, ct, len(respBody))
+		AppLogger.Printf("[UsageRecord] Skipped: status=%d ct=%s bodyLen=%d", lastResp.StatusCode, ct, len(respBody))
 	}
 
 	w.WriteHeader(lastResp.StatusCode)

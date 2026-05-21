@@ -4,6 +4,7 @@ import (
 	"embed"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -29,6 +30,34 @@ var globalLogChan = make(chan LogEntry, 1000)
 // LogChan returns the global log entry channel.
 func LogChan() <-chan LogEntry {
 	return globalLogChan
+}
+
+// init sets up a custom logger that writes to the frontend via globalLogChan.
+var AppLogger *log.Logger
+
+func init() {
+	AppLogger = log.New(&logWriter{}, "", 0)
+}
+
+// logWriter implements io.Writer and pushes log entries to the frontend channel.
+type logWriter struct{}
+
+func (w *logWriter) Write(p []byte) (int, error) {
+	line := strings.TrimSpace(string(p))
+	if line == "" {
+		return len(p), nil
+	}
+	entry := LogEntry{
+		Raw:       line,
+		Timestamp: time.Now().Format("15:04:05"),
+		Level:     "INFO",
+		Message:   line,
+	}
+	select {
+	case globalLogChan <- entry:
+	default:
+	}
+	return len(p), nil
 }
 
 // MBProcess manages the Moon Bridge subprocess lifecycle.

@@ -4,7 +4,6 @@ import (
 	"context"
 	"embed"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -304,13 +303,13 @@ func (a *App) StartMoonBridge() error {
 			for _, r := range a.config.Routes {
 				if r.Alias == alias {
 					resolved := r.Model
-					log.Printf("[ResolveModel] %s -> %s", alias, resolved)
+					backend.AppLogger.Printf("[ResolveModel] %s -> %s", alias, resolved)
 					return resolved
 				}
 			}
 		}
 		// No route found — use the alias as-is (it's likely the actual model name)
-		log.Printf("[ResolveModel] %s -> %s (no route, returning alias)", alias, alias)
+		backend.AppLogger.Printf("[ResolveModel] %s -> %s (no route, returning alias)", alias, alias)
 		return alias
 	})
 
@@ -518,7 +517,7 @@ func (a *App) DeleteProvider(key string) error {
 
 // SwitchModel changes the active route to use a different model.
 func (a *App) SwitchModel(routeAlias string) error {
-	log.Printf("[SwitchModel] switching to: %s", routeAlias)
+	backend.AppLogger.Printf("[SwitchModel] switching to: %s", routeAlias)
 	if err := a.ensureConfigLoaded(); err != nil {
 		return err
 	}
@@ -527,7 +526,7 @@ func (a *App) SwitchModel(routeAlias string) error {
 	for i, r := range a.config.Routes {
 		if r.Alias == "moonbridge" {
 			a.config.Routes[i].Model = routeAlias
-			log.Printf("[SwitchModel] updated moonbridge route Model=%s", routeAlias)
+			backend.AppLogger.Printf("[SwitchModel] updated moonbridge route Model=%s", routeAlias)
 			break
 		}
 	}
@@ -538,7 +537,7 @@ func (a *App) SwitchModel(routeAlias string) error {
 		if r.Alias == routeAlias {
 			a.config.Routes[i].Model = routeAlias
 			updated = true
-			log.Printf("[SwitchModel] updated existing route %s", routeAlias)
+			backend.AppLogger.Printf("[SwitchModel] updated existing route %s", routeAlias)
 			break
 		}
 	}
@@ -548,11 +547,11 @@ func (a *App) SwitchModel(routeAlias string) error {
 			Model:    routeAlias,
 			Provider: "deepseek",
 		})
-		log.Printf("[SwitchModel] created new route %s", routeAlias)
+		backend.AppLogger.Printf("[SwitchModel] created new route %s", routeAlias)
 	}
 
 	a.config.DefaultRoute = routeAlias
-	log.Printf("[SwitchModel] DefaultRoute=%s, routes=%d", routeAlias, len(a.config.Routes))
+	backend.AppLogger.Printf("[SwitchModel] DefaultRoute=%s, routes=%d", routeAlias, len(a.config.Routes))
 	if err := a.configMgr.SaveConfig(a.config); err != nil {
 		return fmt.Errorf("save config: %w", err)
 	}
