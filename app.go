@@ -502,6 +502,32 @@ func (a *App) SwitchModel(routeAlias string) error {
 	if err := a.ensureConfigLoaded(); err != nil {
 		return err
 	}
+
+	// Update the moonbridge route's Model so the proxy resolves to the selected model
+	for i, r := range a.config.Routes {
+		if r.Alias == "moonbridge" {
+			a.config.Routes[i].Model = routeAlias
+			break
+		}
+	}
+
+	// If a route with this alias already exists, update it; otherwise create one
+	updated := false
+	for i, r := range a.config.Routes {
+		if r.Alias == routeAlias {
+			a.config.Routes[i].Model = routeAlias
+			updated = true
+			break
+		}
+	}
+	if !updated {
+		a.config.Routes = append(a.config.Routes, backend.RouteConfig{
+			Alias:    routeAlias,
+			Model:    routeAlias,
+			Provider: "deepseek",
+		})
+	}
+
 	a.config.DefaultRoute = routeAlias
 	if err := a.configMgr.SaveConfig(a.config); err != nil {
 		return fmt.Errorf("save config: %w", err)
