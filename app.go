@@ -177,9 +177,17 @@ func (a *App) syncRoutes() {
 	}
 	// Add "moonbridge" as a fallback alias for Codex compatibility
 	if len(routes) > 0 {
+		// Preserve existing moonbridge route's Model if user customized it
+		mbModel := routes[0].Model
+		for _, r := range a.config.Routes {
+			if r.Alias == "moonbridge" && r.Model != "" && r.Model != routes[0].Model {
+				mbModel = r.Model
+				break
+			}
+		}
 		routes = append([]backend.RouteConfig{{
 			Alias:    "moonbridge",
-			Model:    routes[0].Model,
+			Model:    mbModel,
 			Provider: routes[0].Provider,
 		}}, routes...)
 	}

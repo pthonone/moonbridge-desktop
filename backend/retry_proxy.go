@@ -144,6 +144,22 @@ type responseUsageOpenAI struct {
 	} `json:"usage"`
 }
 
+// OpenAI Responses API usage (non-streaming, moonbridge)
+type responseUsageResponses struct {
+	Model string `json:"model"`
+	Usage struct {
+		InputTokens        int `json:"input_tokens"`
+		OutputTokens       int `json:"output_tokens"`
+		TotalTokens        int `json:"total_tokens"`
+		InputTokensDetails struct {
+			CachedTokens int `json:"cached_tokens"`
+		} `json:"input_tokens_details"`
+		OutputTokensDetails struct {
+			ReasoningTokens int `json:"reasoning_tokens"`
+		} `json:"output_tokens_details"`
+	} `json:"usage"`
+}
+
 // SSEUsageExtractor parses SSE stream events to extract usage data.
 type SSEUsageExtractor struct {
 	inputTokens  int
@@ -504,35 +520,65 @@ func (rp *RetryProxy) handleRequest(w http.ResponseWriter, r *http.Request) {
 	rp.mu.Unlock()
 
 	if lastResp.StatusCode == 200 && strings.Contains(ct, "application/json") && len(respBody) > 0 {
-		// Try Anthropic-style first
-		var u responseUsage
-		if err := json.Unmarshal(respBody, &u); err == nil && u.Usage.InputTokens > 0 {
+		// Try OpenAI Responses API first (MoonBridge /v1/responses)
+		var r responseUsageResponses
+		if err := json.Unmarshal(respBody, &r); err == nil && r.Usage.InputTokens > 0 {
+			log.Printf("[UsageRecord] Responses API: model=%s input=%d output=%d cacheRead=%d cacheWrite=%d",
+				resolvedModel, r.Usage.InputTokens, r.Usage.OutputTokens, r.Usage.InputTokensDetails.CachedTokens, 0)
 			rp.mu.Lock()
 			if rp.recordUsage != nil {
 				rp.recordUsage(
 					resolvedModel,
-					u.Usage.InputTokens,
-					u.Usage.OutputTokens,
-					u.Usage.InputTokensDetails.CachedTokens,
-					u.Usage.CacheCreationInputTokens,
+					r.Usage.InputTokens,
+					r.Usage.OutputTokens,
+					r.Usage.InputTokensDetails.CachedTokens,
+					0,
 				)
+			} else {
+				log.Printf("[UsageRecord] recordUsage callback is nil!")
 			}
 			rp.mu.Unlock()
 		} else {
-			// Fallback: OpenAI-style
-			var o responseUsageOpenAI
-			if err := json.Unmarshal(respBody, &o); err == nil && o.Usage.PromptTokens > 0 {
+			// Try Anthropic-style
+			var u responseUsage
+			if err := json.Unmarshal(respBody, &u); err == nil && u.Usage.InputTokens > 0 {
+				log.Printf("[UsageRecord] Anthropic path: model=%s input=%d output=%d cacheRead=%d cacheWrite=%d",
+					resolvedModel, u.Usage.InputTokens, u.Usage.OutputTokens, u.Usage.InputTokensDetails.CachedTokens, u.Usage.CacheCreationInputTokens)
 				rp.mu.Lock()
 				if rp.recordUsage != nil {
 					rp.recordUsage(
 						resolvedModel,
-						o.Usage.PromptTokens,
-						o.Usage.CompletionTokens,
-						o.Usage.PromptTokensDetails.CachedTokens,
-						0,
+						u.Usage.InputTokens,
+						u.Usage.OutputTokens,
+						u.Usage.InputTokensDetails.CachedTokens,
+						u.Usage.CacheCreationInputTokens,
 					)
+				} else {
+					log.Printf("[UsageRecord] recordUsage callback is nil!")
 				}
 				rp.mu.Unlock()
+			} else {
+				// Fallback: OpenAI-style
+				var o responseUsageOpenAI
+				if err := json.Unmarshal(respBody, &o); err == nil && o.Usage.PromptTokens > 0 {
+					log.Printf("[UsageRecord] OpenAI path: model=%s prompt=%d completion=%d",
+						resolvedModel, o.Usage.PromptTokens, o.Usage.CompletionTokens)
+					rp.mu.Lock()
+					if rp.recordUsage != nil {
+						rp.recordUsage(
+							resolvedModel,
+							o.Usage.PromptTokens,
+							o.Usage.CompletionTokens,
+							o.Usage.PromptTokensDetails.CachedTokens,
+							0,
+						)
+					} else {
+						log.Printf("[UsageRecord] recordUsage callback is nil!")
+					}
+					rp.mu.Unlock()
+				} else {
+					log.Printf("[UsageRecord] No usage data found in response")
+				}
 			}
 		}
 		// Record per-request exactly once for successful response
@@ -541,6 +587,8 @@ func (rp *RetryProxy) handleRequest(w http.ResponseWriter, r *http.Request) {
 			rp.recordRequest(resolvedModel)
 		}
 		rp.mu.Unlock()
+	} else {
+		log.Printf("[UsageRecord] Skipped: status=%d ct=%s bodyLen=%d", lastResp.StatusCode, ct, len(respBody))
 	}
 
 	w.WriteHeader(lastResp.StatusCode)
