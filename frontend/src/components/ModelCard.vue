@@ -8,6 +8,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   'set-default': []
+  'delete': []
 }>()
 
 const capLabels: Record<string, string> = {
@@ -97,6 +98,12 @@ function pricingText(): string {
       </svg>
     </button>
     <span v-else class="active-badge">默认</span>
+    <button class="delete-btn" @click="emit('delete')" title="删除模型">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <line x1="18" y1="6" x2="6" y2="18"/>
+        <line x1="6" y1="6" x2="18" y2="18"/>
+      </svg>
+    </button>
   </div>
 </template>
 
@@ -230,6 +237,32 @@ function pricingText(): string {
   border-color: var(--green-500);
   color: var(--green-500);
   background: var(--green-100);
+}
+
+.delete-btn {
+  background: transparent;
+  border: 1px solid var(--gray-200);
+  color: var(--gray-400);
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s;
+  flex-shrink: 0;
+}
+
+.delete-btn svg {
+  width: 14px;
+  height: 14px;
+}
+
+.delete-btn:hover {
+  border-color: var(--red-500);
+  color: var(--red-500);
+  background: var(--red-100);
 }
 
 .active-badge {

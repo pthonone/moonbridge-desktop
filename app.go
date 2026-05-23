@@ -385,6 +385,49 @@ func (a *App) ListModels() []backend.ModelConfig {
 	return a.config.Models
 }
 
+// AddModel adds a new model to the config.
+func (a *App) AddModel(m backend.ModelConfig) error {
+	if err := a.ensureConfigLoaded(); err != nil {
+		return err
+	}
+	for _, existing := range a.config.Models {
+		if existing.Slug == m.Slug {
+			return fmt.Errorf("模型 '%s' 已存在", m.Slug)
+		}
+	}
+	a.config.Models = append(a.config.Models, m)
+	a.syncRoutes()
+	_ = a.configMgr.SaveConfig(a.config)
+	a.syncCodexConfig()
+	return nil
+}
+
+// DeleteModel removes a model by slug.
+func (a *App) DeleteModel(slug string) error {
+	if err := a.ensureConfigLoaded(); err != nil {
+		return err
+	}
+	before := len(a.config.Models)
+	newModels := make([]backend.ModelConfig, 0, before)
+	for _, m := range a.config.Models {
+		if m.Slug != slug {
+			newModels = append(newModels, m)
+		}
+	}
+	if len(newModels) == before {
+		return fmt.Errorf("模型 '%s' 不存在", slug)
+	}
+	a.config.Models = newModels
+	// If the deleted model was the default, reset to first available
+	if a.config.DefaultRoute == slug && len(a.config.Models) > 0 {
+		a.config.DefaultRoute = a.config.Models[0].Slug
+	}
+	a.syncRoutes()
+	_ = a.configMgr.SaveConfig(a.config)
+	a.syncCodexConfig()
+	return nil
+}
+
 // ListProviders returns configured providers.
 func (a *App) ListProviders() []backend.ProviderConfig {
 	if a.config == nil {

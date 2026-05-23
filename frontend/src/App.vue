@@ -5,7 +5,7 @@ import LogViewer from './components/LogViewer.vue'
 import ProviderEditor from './components/ProviderEditor.vue'
 import ModelCard from './components/ModelCard.vue'
 import { EventsOn, EventsOff } from '@wailsjs/runtime/runtime'
-import { GetStatus, StartMoonBridge, StopMoonBridge, GetConfig, GetUsageStats, GetProviderPresets, ListModels, ListProviders, GetUsageDailyStats, GetUsageHourlyStats, GetUsageRecentRecords, GetUsageByModel, ClearUsageToday, ClearUsageAll, IsCodexEnabled, SetCodexEnabled } from '@wailsjs/go/main/App'
+import { GetStatus, StartMoonBridge, StopMoonBridge, GetConfig, GetUsageStats, GetProviderPresets, ListModels, ListProviders, GetUsageDailyStats, GetUsageHourlyStats, GetUsageRecentRecords, GetUsageByModel, ClearUsageToday, ClearUsageAll, IsCodexEnabled, SetCodexEnabled, DeleteModel } from '@wailsjs/go/main/App'
 
 interface MBStatus { running: boolean; port: number; current_route: string; error: string }
 interface DesktopConfig { port: number; log_level: string; providers: any[]; models: any[]; routes: any[]; default_route: string; max_tokens: number; metrics_enabled: boolean }
@@ -246,6 +246,16 @@ async function handleSwitchRoute(alias: string) {
   try {
     await SwitchModel(alias)
     await refreshStatus()
+    await refreshConfig()
+  } catch (e: any) {
+    statusError.value = e.message || String(e)
+  }
+}
+
+async function handleDeleteModel(slug: string) {
+  if (!confirm(`确定要删除模型 "${slug}" 吗？`)) return
+  try {
+    await DeleteModel(slug)
     await refreshConfig()
   } catch (e: any) {
     statusError.value = e.message || String(e)
@@ -528,7 +538,7 @@ function capClass(cap: string): string {
           <div v-for="group in groupedModels" :key="group.series" class="model-group">
             <h3 class="group-header">{{ group.series }}</h3>
             <div class="model-list">
-              <ModelCard v-for="m in group.models" :key="m.slug" :model="m" :offer="offerMap[m.slug]?.offer || null" :provider-name="offerMap[m.slug]?.providerName || ''" :is-active="m.slug === config.default_route" @set-default="handleSwitchRoute(m.slug)" />
+              <ModelCard v-for="m in group.models" :key="m.slug" :model="m" :offer="offerMap[m.slug]?.offer || null" :provider-name="offerMap[m.slug]?.providerName || ''" :is-active="m.slug === config.default_route" @set-default="handleSwitchRoute(m.slug)" @delete="handleDeleteModel(m.slug)" />
             </div>
           </div>
           <div v-if="filteredModels.length === 0" class="no-data">暂无匹配的模型</div>
