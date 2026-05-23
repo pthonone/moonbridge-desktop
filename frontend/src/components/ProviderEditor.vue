@@ -237,11 +237,6 @@ async function handleSave() {
               <span class="model-entry-num">#{{ idx + 1 }}</span>
               <input v-model="m.name" class="model-entry-name" placeholder="模型名称" />
               <input v-model="m.series" class="model-entry-series" placeholder="系列" />
-              <button class="remove-btn" @click="removeModel(idx)" :disabled="form.models.length === 1">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-                </svg>
-              </button>
             </div>
             <div class="model-entry-body">
               <div class="body-row">
@@ -280,6 +275,9 @@ async function handleSave() {
                 <label>每次请求费用 (¥) <input type="number" v-model.number="m.per_request_cost" step="0.0001" min="0" /></label>
               </div>
             </div>
+            <button class="remove-btn" @click="removeModel(idx)" :disabled="form.models.length === 1">
+              删除模型
+            </button>
           </div>
           <button class="add-model-btn" @click="addModel">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -474,17 +472,15 @@ async function handleSave() {
 .model-entry {
   border: 1px solid var(--gray-200);
   border-radius: var(--radius);
-  padding: 10px 38px 10px 12px;
+  padding: 10px 12px;
   margin-bottom: 8px;
   background: var(--gray-50);
-  position: relative;
 }
 
 .model-entry-header {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding-right: 34px;
 }
 
 .model-entry-num {
@@ -622,22 +618,31 @@ async function handleSave() {
 }
 
 .remove-btn {
-  position: absolute;
-  top: 8px;
-  right: 6px;
+  width: 100%;
   background: transparent;
-  border: 1px solid var(--gray-200);
-  color: var(--gray-300);
-  width: 26px;
-  height: 26px;
-  border-radius: 6px;
+  border: 1px dashed var(--gray-300);
+  color: var(--gray-400);
+  padding: 6px 12px;
+  border-radius: 8px;
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
   transition: all 0.15s;
-  flex-shrink: 0;
-  padding: 0;
+  font-size: 12px;
+  font-weight: 500;
+  margin-top: 8px;
+}
+
+.remove-btn:hover:not(:disabled) {
+  border-color: var(--red-500);
+  color: var(--red-500);
+  background: var(--red-50);
+}
+
+.remove-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .remove-btn svg {
