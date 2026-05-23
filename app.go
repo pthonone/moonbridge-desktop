@@ -473,6 +473,8 @@ func (a *App) ensureModelsFromOffers() {
 		}
 	}
 
+	backend.AppLogger.Printf("[ensureModelsFromOffers] offers=%d, existing models=%d", len(offerMap), len(a.config.Models))
+
 	// Build new model list from offers, preserving existing model data where possible
 	existingMap := make(map[string]backend.ModelConfig)
 	for _, m := range a.config.Models {
@@ -491,6 +493,8 @@ func (a *App) ensureModelsFromOffers() {
 			m.Capabilities = o.Capabilities
 			kept = append(kept, m)
 			seenOrder[m.Slug] = true
+		} else {
+			backend.AppLogger.Printf("[ensureModelsFromOffers] removing model %s (no longer in offers)", m.Slug)
 		}
 	}
 	// Second pass: new models not yet in config

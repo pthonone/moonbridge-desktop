@@ -108,9 +108,7 @@ function addModel() {
 }
 
 function removeModel(idx: number) {
-  if (form.value.models.length > 1) {
-    form.value.models.splice(idx, 1)
-  }
+  form.value.models.splice(idx, 1)
 }
 
 function toggleCap(m: ModelForm, cap: string) {
@@ -123,10 +121,6 @@ async function handleSave() {
   const validModels = form.value.models.filter(m => m.name.trim())
   if (!form.value.key || !form.value.base_url || !form.value.api_key) {
     error.value = '服务标识、地址和 API 密钥为必填项。'
-    return
-  }
-  if (validModels.length === 0) {
-    error.value = '请至少填写一个模型名称。'
     return
   }
   error.value = ''
@@ -243,7 +237,7 @@ async function handleSave() {
               <span class="model-entry-num">#{{ idx + 1 }}</span>
               <input v-model="m.name" class="model-entry-name" placeholder="模型名称" />
               <input v-model="m.series" class="model-entry-series" placeholder="系列" />
-              <button class="remove-btn" @click="removeModel(idx)" v-if="form.models.length > 1">
+              <button class="remove-btn" @click="removeModel(idx)" :disabled="form.models.length === 1">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                   <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
                 </svg>
