@@ -474,15 +474,17 @@ async function handleSave() {
 .model-entry {
   border: 1px solid var(--gray-200);
   border-radius: var(--radius);
-  padding: 10px 12px;
+  padding: 10px 38px 10px 12px;
   margin-bottom: 8px;
   background: var(--gray-50);
+  position: relative;
 }
 
 .model-entry-header {
   display: flex;
   align-items: center;
   gap: 6px;
+  padding-right: 34px;
 }
 
 .model-entry-num {
@@ -620,11 +622,14 @@ async function handleSave() {
 }
 
 .remove-btn {
+  position: absolute;
+  top: 8px;
+  right: 6px;
   background: transparent;
   border: 1px solid var(--gray-200);
   color: var(--gray-300);
-  width: 30px;
-  height: 30px;
+  width: 26px;
+  height: 26px;
   border-radius: 6px;
   cursor: pointer;
   display: flex;
