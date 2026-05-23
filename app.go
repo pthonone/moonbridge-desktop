@@ -516,6 +516,16 @@ func (a *App) DeleteProvider(key string) error {
 	}
 	a.config.Providers = newProviders
 	a.syncRoutes()
+	// If the default route was from the deleted provider, reset to first available
+	existing := make(map[string]bool)
+	for _, p := range a.config.Providers {
+		for _, o := range p.Offers {
+			existing[o.Model] = true
+		}
+	}
+	if !existing[a.config.DefaultRoute] && len(a.config.Routes) > 0 {
+		a.config.DefaultRoute = a.config.Routes[0].Alias
+	}
 	_ = a.configMgr.SaveConfig(a.config)
 	a.syncCodexConfig()
 	return nil
@@ -528,42 +538,50 @@ func (a *App) SwitchModel(routeAlias string) error {
 		return err
 	}
 
-	// Update the moonbridge route's Model so the proxy resolves to the selected model
-	for i, r := range a.config.Routes {
-		if r.Alias == "moonbridge" {
-			a.config.Routes[i].Model = routeAlias
-			backend.AppLogger.Printf("[SwitchModel] updated moonbridge route Model=%s", routeAlias)
-			break
+	// Rebuild routes from provider offers to remove stale entries
+	existing := make(map[string]bool)
+	routes := make([]backend.RouteConfig, 0)
+	for _, p := range a.config.Providers {
+		for _, o := range p.Offers {
+			if !existing[o.Model] {
+				routes = append(routes, backend.RouteConfig{
+					Alias:    o.Model,
+					Model:    o.Model,
+					Provider: p.Key,
+				})
+				existing[o.Model] = true
+			}
 		}
 	}
 
-	// If a route with this alias already exists, update it; otherwise create one
-	updated := false
-	for i, r := range a.config.Routes {
-		if r.Alias == routeAlias {
-			a.config.Routes[i].Model = routeAlias
-			updated = true
-			backend.AppLogger.Printf("[SwitchModel] updated existing route %s", routeAlias)
-			break
-		}
+	// Verify the requested model exists in provider offers
+	if !existing[routeAlias] {
+		return fmt.Errorf("model %q not found in any provider", routeAlias)
 	}
-	if !updated {
-		a.config.Routes = append(a.config.Routes, backend.RouteConfig{
-			Alias:    routeAlias,
+
+	// Add "moonbridge" as a fallback alias for Codex compatibility
+	if len(routes) > 0 {
+		routes = append([]backend.RouteConfig{{
+			Alias:    "moonbridge",
 			Model:    routeAlias,
-			Provider: "deepseek",
-		})
-		backend.AppLogger.Printf("[SwitchModel] created new route %s", routeAlias)
+			Provider: routes[0].Provider,
+		}}, routes...)
 	}
 
+	a.config.Routes = routes
 	a.config.DefaultRoute = routeAlias
-	backend.AppLogger.Printf("[SwitchModel] DefaultRoute=%s, routes=%d", routeAlias, len(a.config.Routes))
+	backend.AppLogger.Printf("[SwitchModel] DefaultRoute=%s, routes=%d (rebuilt)", routeAlias, len(a.config.Routes))
+
 	if err := a.configMgr.SaveConfig(a.config); err != nil {
 		return fmt.Errorf("save config: %w", err)
 	}
 	a.syncCodexConfig()
 	if a.ctx != nil {
 		runtime.EventsEmit(a.ctx, "model-changed", routeAlias)
+	}
+	// Update system tray menu
+	if a.systray != nil {
+		a.systray.UpdateMenu()
 	}
 	// If running, restart with new config
 	if a.mbProcess != nil && a.mbProcess.IsRunning() {
