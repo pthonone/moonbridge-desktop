@@ -662,9 +662,9 @@ async function handleSave() {
   justify-content: center;
   gap: 6px;
   width: 100%;
-  background: transparent;
-  border: 1px dashed var(--gray-300);
-  color: var(--gray-400);
+  background: white;
+  border: 1px dashed var(--gray-400);
+  color: var(--gray-600);
   padding: 8px 12px;
   border-radius: 8px;
   cursor: pointer;
