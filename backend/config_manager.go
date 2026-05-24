@@ -64,6 +64,9 @@ func (cm *ConfigManager) GenerateMoonBridgeYAML(cfg *DesktopConfig) error {
 	if err := os.MkdirAll(cm.dataDir, 0755); err != nil {
 		return fmt.Errorf("create data dir: %w", err)
 	}
+	if err := os.MkdirAll(filepath.Join(cm.dataDir, "data"), 0755); err != nil {
+		return fmt.Errorf("create data subdirectory: %w", err)
+	}
 
 	var sb strings.Builder
 
@@ -81,10 +84,12 @@ func (cm *ConfigManager) GenerateMoonBridgeYAML(cfg *DesktopConfig) error {
 	sb.WriteString("persistence:\n  active_provider: db_sqlite\n\n")
 
 	// Extensions
+	dbPath := filepath.Join(cm.dataDir, "data", "moonbridge.db")
+	escapedDBPath := strings.ReplaceAll(dbPath, "\\", "\\\\")
 	if cfg.MetricsEnabled {
-		sb.WriteString("extensions:\n  metrics:\n    enabled: true\n  db_sqlite:\n    enabled: true\n    config:\n      path: ./data/moonbridge.db\n      wal: true\n\n")
+		sb.WriteString(fmt.Sprintf("extensions:\n  metrics:\n    enabled: true\n  db_sqlite:\n    enabled: true\n    config:\n      path: \"%s\"\n      wal: true\n\n", escapedDBPath))
 	} else {
-		sb.WriteString("extensions:\n  db_sqlite:\n    enabled: true\n    config:\n      path: ./data/moonbridge.db\n      wal: true\n\n")
+		sb.WriteString(fmt.Sprintf("extensions:\n  db_sqlite:\n    enabled: true\n    config:\n      path: \"%s\"\n      wal: true\n\n", escapedDBPath))
 	}
 
 	// Models - include both cfg.Models and provider offers
