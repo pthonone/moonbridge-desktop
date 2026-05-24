@@ -269,6 +269,10 @@ func (a *App) StartMoonBridge() error {
 	// Create data subdirectory for SQLite
 	os.MkdirAll(filepath.Join(dataDir, "data"), 0755)
 
+	// Validate SQLite database — if corrupted, backup and let MoonBridge recreate
+	dbPath := filepath.Join(dataDir, "data", "moonbridge.db")
+	backend.ValidateAndFixSQLiteDB(dbPath)
+
 	// Start MoonBridge on internal port
 	a.mbProcess = backend.NewMBProcess(internalPort, configPath, binaryPath)
 

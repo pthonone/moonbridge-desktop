@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"bytes"
 	"embed"
 	"fmt"
 	"io"
@@ -250,4 +251,27 @@ func parseLogLine(raw string) LogEntry {
 		}
 	}
 	return entry
+}
+
+// ValidateAndFixSQLiteDB checks if a SQLite database file is valid.
+// SQLite files start with "SQLite format 3\000" and are at least 100 bytes.
+// If corrupted, backs up the file (renames with .corrupted timestamp) so
+// MoonBridge can create a fresh one. Returns true if DB is valid or absent.
+func ValidateAndFixSQLiteDB(dbPath string) bool {
+	data, err := os.ReadFile(dbPath)
+	if err != nil {
+		// File doesn't exist — not corrupted, MoonBridge will create it
+		return true
+	}
+
+	// SQLite database files start with "SQLite format 3\000" and are >= 100 bytes
+	if len(data) < 100 || !bytes.Equal(data[:16], []byte("SQLite format 3\x00")) {
+		backupPath := dbPath + ".corrupted." + time.Now().Format("20060102150405")
+		if err := os.Rename(dbPath, backupPath); err != nil {
+			os.Remove(dbPath) // fallback: just remove
+		}
+		AppLogger.Printf("[SQLite] corrupted DB detected at %s, backed up to %s", dbPath, backupPath)
+		return true // MoonBridge will create fresh DB
+	}
+	return true
 }
