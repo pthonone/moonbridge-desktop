@@ -275,8 +275,10 @@ async function handleSave() {
                 <label>每次请求费用 (¥) <input type="number" v-model.number="m.per_request_cost" step="0.0001" min="0" /></label>
               </div>
             </div>
-            <button class="remove-btn" @click="removeModel(idx)" :disabled="form.models.length === 1">
-              删除模型
+            <button class="remove-btn" @click="removeModel(idx)" :disabled="form.models.length === 1" title="删除模型">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+              </svg>
             </button>
           </div>
           <button class="add-model-btn" @click="addModel">
@@ -374,7 +376,7 @@ async function handleSave() {
 }
 
 .modal-body {
-  padding: 20px;
+  padding: 20px 20px 24px;
   display: flex;
   flex-direction: column;
   gap: 14px;
@@ -475,6 +477,7 @@ async function handleSave() {
   padding: 10px 12px;
   margin-bottom: 8px;
   background: var(--gray-50);
+  position: relative;
 }
 
 .model-entry-header {
@@ -618,20 +621,21 @@ async function handleSave() {
 }
 
 .remove-btn {
-  width: 100%;
-  background: transparent;
-  border: 1px dashed var(--gray-300);
+  position: absolute;
+  bottom: 8px;
+  right: 8px;
+  width: 28px;
+  height: 28px;
+  background: var(--gray-50);
+  border: 1px solid var(--gray-200);
   color: var(--gray-400);
-  padding: 6px 12px;
-  border-radius: 8px;
+  border-radius: 6px;
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
   transition: all 0.15s;
-  font-size: 12px;
-  font-weight: 500;
-  margin-top: 8px;
+  padding: 0;
 }
 
 .remove-btn:hover:not(:disabled) {
@@ -641,19 +645,13 @@ async function handleSave() {
 }
 
 .remove-btn:disabled {
-  opacity: 0.4;
+  opacity: 0.3;
   cursor: not-allowed;
 }
 
 .remove-btn svg {
   width: 14px;
   height: 14px;
-}
-
-.remove-btn:hover {
-  color: var(--red-500);
-  border-color: var(--red-500);
-  background: var(--red-100);
 }
 
 .add-model-btn {
