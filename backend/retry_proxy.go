@@ -1220,10 +1220,18 @@ func (tp *TransparentProxy) handleRequest(w http.ResponseWriter, r *http.Request
 		var sseHasEmittedCreated, sseHasCompleted bool
 		var sseHasEmittedText, sseHasEmittedReasoning bool
 		var sseTextContent, sseReasoningContent strings.Builder
-		var sseToolID, sseToolName string
-		var sseToolArgsBuilder strings.Builder
-		var sseHasToolCall bool
-		sseOutputIndex := 0    // increments for each output item
+		// Tool call state - matches cc-switch BTreeMap<usize, ToolCallState>
+		type sseToolState struct {
+			callID       string
+			name         string
+			args         strings.Builder
+			added        bool
+			done         bool
+			outputIndex  int
+			itemID       string
+		}
+		sseTools := make(map[int]*sseToolState)
+				sseOutputIndex := 0    // increments for each output item
 		sseCurrentItemID := "" // item_id for current output item
 
 		writeSSEEvent := func(eventType string, data any) {
@@ -1288,148 +1296,228 @@ func (tp *TransparentProxy) handleRequest(w http.ResponseWriter, r *http.Request
 			}
 			sseHasCompleted = true
 
-			// Close any open tool call
-			if sseHasToolCall && sseToolID != "" {
-				writeSSEEvent("response.output_item.added", map[string]any{
-					"output_index": sseOutputIndex,
-					"item": map[string]any{
-						"type":      "function_call",
-						"id":        sseToolID,
-						"name":      sseToolName,
-						"status":    "completed",
-						"arguments": sseToolArgsBuilder.String(),
-					},
-				})
-				writeSSEEvent("response.function_call_arguments.done", map[string]any{
-					"output_index": sseOutputIndex,
-					"item_id":      sseToolID,
-					"parsed":       nil,
-					"arguments":    sseToolArgsBuilder.String(),
-				})
-				writeSSEEvent("response.output_item.done", map[string]any{
-					"output_index": sseOutputIndex,
-					"item": map[string]any{
-						"type":      "function_call",
-						"id":        sseToolID,
-						"name":      sseToolName,
-						"status":    "completed",
-						"arguments": sseToolArgsBuilder.String(),
-					},
-				})
-				sseOutputIndex++
+			// 1. Finalize tool calls (cc-switch finalizeTools)
+			for tcIdx, ts := range sseTools {
+				if ts.added && !ts.done {
+					if ts.callID == "" {
+						ts.callID = fmt.Sprintf("call_%d", tcIdx)
+					}
+					if ts.name == "" {
+						ts.name = "unknown_tool"
+					}
+					if ts.itemID == "" {
+						ts.itemID = fmt.Sprintf("fc_%s", ts.callID)
+					}
+					ts.outputIndex = sseOutputIndex
+					sseOutputIndex++
+					ts.done = true
+					sseTools[tcIdx] = ts
+
+					writeSSEEvent("response.function_call_arguments.done", map[string]any{
+						"output_index": ts.outputIndex,
+						"item_id":      ts.itemID,
+						"arguments":    ts.args.String(),
+					})
+					writeSSEEvent("response.output_item.done", map[string]any{
+						"output_index": ts.outputIndex,
+						"item": map[string]any{
+							"id":        ts.itemID,
+							"type":      "function_call",
+							"status":    "completed",
+							"call_id":   ts.callID,
+							"name":      ts.name,
+							"arguments": ts.args.String(),
+						},
+					})
+				} else if !ts.added && (ts.callID != "" || ts.name != "") {
+					// Tool was never added - create it now
+					ts.added = true
+					if ts.callID == "" {
+						ts.callID = fmt.Sprintf("call_%d", tcIdx)
+					}
+					if ts.name == "" {
+						ts.name = "unknown_tool"
+					}
+					ts.outputIndex = sseOutputIndex
+					ts.itemID = fmt.Sprintf("fc_%s", ts.callID)
+					sseOutputIndex++
+					ts.done = true
+					sseTools[tcIdx] = ts
+
+					writeSSEEvent("response.output_item.added", map[string]any{
+						"output_index": ts.outputIndex,
+						"item": map[string]any{
+							"id":        ts.itemID,
+							"type":      "function_call",
+							"status":    "in_progress",
+							"call_id":   ts.callID,
+							"name":      ts.name,
+							"arguments": "",
+						},
+					})
+					writeSSEEvent("response.function_call_arguments.done", map[string]any{
+						"output_index": ts.outputIndex,
+						"item_id":      ts.itemID,
+						"arguments":    ts.args.String(),
+					})
+					writeSSEEvent("response.output_item.done", map[string]any{
+						"output_index": ts.outputIndex,
+						"item": map[string]any{
+							"id":        ts.itemID,
+							"type":      "function_call",
+							"status":    "completed",
+							"call_id":   ts.callID,
+							"name":      ts.name,
+							"arguments": ts.args.String(),
+						},
+					})
+				}
 			}
 
-			// Close reasoning item if any
+			// 2. Close reasoning item (cc-switch finalizeReasoning)
 			if sseHasEmittedReasoning {
+				outputIndex := sseOutputIndex - 1
+				reasoningItemID := fmt.Sprintf("rs_%s", sseMessageID)
 				writeSSEEvent("response.reasoning_summary_text.done", map[string]any{
-					"output_index": sseOutputIndex - 1,
-					"item_id":      sseCurrentItemID,
-					"text":         sseReasoningContent.String(),
+					"output_index":  outputIndex,
+					"item_id":       reasoningItemID,
+					"summary_index": 0,
+					"text":          sseReasoningContent.String(),
 				})
-				writeSSEEvent("response.output_item.done", map[string]any{
-					"output_index": sseOutputIndex - 1,
-					"item": map[string]any{
-						"type":   "reasoning",
-						"id":     sseCurrentItemID,
-						"status": "completed",
-					},
-				})
-			}
-
-			// Close text item if any
-			if sseHasEmittedText {
-				writeSSEEvent("response.content_part.done", map[string]any{
-					"output_index":  sseOutputIndex - 1,
-					"item_id":       sseCurrentItemID,
-					"content_index": 0,
+				writeSSEEvent("response.reasoning_summary_part.done", map[string]any{
+					"output_index":  outputIndex,
+					"item_id":       reasoningItemID,
+					"summary_index": 0,
 					"part": map[string]any{
-						"type": "output_text",
-						"text": sseTextContent.String(),
+						"type": "summary_text",
+						"text": sseReasoningContent.String(),
 					},
 				})
 				writeSSEEvent("response.output_item.done", map[string]any{
-					"output_index": sseOutputIndex - 1,
+					"output_index": outputIndex,
 					"item": map[string]any{
-						"type":   "message",
-						"role":   "assistant",
+						"id":     reasoningItemID,
+						"type":   "reasoning",
 						"status": "completed",
-						"content": []any{
-							map[string]any{"type": "output_text", "text": sseTextContent.String()},
+						"summary": []any{
+							map[string]any{"type": "summary_text", "text": sseReasoningContent.String()},
 						},
 					},
 				})
 			}
 
-			// Build output array for response.completed
+			// 3. Close text item (cc-switch finalizeText: output_text.done -> content_part.done -> output_item.done)
+			if sseHasEmittedText {
+				outputIndex := sseOutputIndex - 1
+				textItemID := fmt.Sprintf("%s_msg", sseMessageID)
+				writeSSEEvent("response.output_text.done", map[string]any{
+					"output_index":  outputIndex,
+					"item_id":       textItemID,
+					"content_index": 0,
+					"text":          sseTextContent.String(),
+				})
+				writeSSEEvent("response.content_part.done", map[string]any{
+					"output_index":  outputIndex,
+					"item_id":       textItemID,
+					"content_index": 0,
+					"part": map[string]any{
+						"type":        "output_text",
+						"text":        sseTextContent.String(),
+						"annotations": []any{},
+					},
+				})
+				writeSSEEvent("response.output_item.done", map[string]any{
+					"output_index": outputIndex,
+					"item": map[string]any{
+						"id":     textItemID,
+						"type":   "message",
+						"status": "completed",
+						"role":   "assistant",
+						"content": []any{
+							map[string]any{"type": "output_text", "text": sseTextContent.String(), "annotations": []any{}},
+						},
+					},
+				})
+			}
+
+			// 4. Build output array for response.completed (sorted by output_index)
 			var outputItems []any
-			reasoningIdx := -1
 			if sseHasEmittedReasoning {
-				reasoningIdx = len(outputItems)
+				reasoningItemID := fmt.Sprintf("rs_%s", sseMessageID)
 				outputItems = append(outputItems, map[string]any{
+					"id":     reasoningItemID,
 					"type":   "reasoning",
-					"id":     fmt.Sprintf("reasoning-%d", reasoningIdx),
 					"status": "completed",
 					"summary": []any{
-						map[string]any{"type": "text", "text": sseReasoningContent.String()},
+						map[string]any{"type": "summary_text", "text": sseReasoningContent.String()},
 					},
 				})
 			}
 			if sseHasEmittedText {
+				textItemID := fmt.Sprintf("%s_msg", sseMessageID)
 				outputItems = append(outputItems, map[string]any{
+					"id":     textItemID,
 					"type":   "message",
-					"role":   "assistant",
 					"status": "completed",
+					"role":   "assistant",
 					"content": []any{
-						map[string]any{"type": "output_text", "text": sseTextContent.String()},
+						map[string]any{"type": "output_text", "text": sseTextContent.String(), "annotations": []any{}},
 					},
 				})
 			}
 
 			resp := buildResponseObj("completed", outputItems)
 			resp["usage"] = map[string]any{
-				"input_tokens":            extractor.inputTokens,
-				"output_tokens":           extractor.outputTokens,
-				"total_tokens":            extractor.inputTokens + extractor.outputTokens,
-				"input_tokens_details":    map[string]any{"cached_tokens": extractor.cacheRead},
-				"output_tokens_details":   map[string]any{"reasoning_tokens": 0},
+				"input_tokens":          extractor.inputTokens,
+				"output_tokens":         extractor.outputTokens,
+				"total_tokens":          extractor.inputTokens + extractor.outputTokens,
+				"input_tokens_details":  map[string]any{"cached_tokens": extractor.cacheRead},
+				"output_tokens_details": map[string]any{"reasoning_tokens": 0},
 			}
 			writeSSEEvent("response.completed", map[string]any{"response": resp})
 		}
 
-		// startReasoningItem: cc-switch pushReasoningSummaryPartAdded
+
+		// startReasoningItem: matches cc-switch pushReasoningSummaryPartAdded
 		startReasoningItem := func() {
 			emitResponseStarted()
-			itemID := fmt.Sprintf("reasoning-%d", sseOutputIndex)
+			itemID := fmt.Sprintf("rs_%s", sseMessageID)
 			sseCurrentItemID = itemID
 			writeSSEEvent("response.output_item.added", map[string]any{
 				"output_index": sseOutputIndex,
 				"item": map[string]any{
-					"type":   "reasoning",
-					"id":     itemID,
-					"status": "in_progress",
+					"id":      itemID,
+					"type":    "reasoning",
+					"status":  "in_progress",
+					"summary": []any{},
 				},
 			})
 			writeSSEEvent("response.reasoning_summary_part.added", map[string]any{
-				"output_index": sseOutputIndex,
-				"item_id":      itemID,
-				"part":         map[string]any{"type": "text"},
+				"output_index":  sseOutputIndex,
+				"item_id":       itemID,
+				"summary_index": 0,
+				"part": map[string]any{
+					"type": "summary_text",
+					"text": "",
+				},
 			})
 			sseHasEmittedReasoning = true
 			sseOutputIndex++
 		}
 
-		// startTextItem: cc-switch pushContentPartAdded + pushOutputTextStarted
+		// startTextItem: matches cc-switch pushContentPartAdded
 		startTextItem := func() {
 			emitResponseStarted()
-			itemID := fmt.Sprintf("msg-%d", sseOutputIndex)
+			itemID := fmt.Sprintf("%s_msg", sseMessageID)
 			sseCurrentItemID = itemID
 			writeSSEEvent("response.output_item.added", map[string]any{
 				"output_index": sseOutputIndex,
 				"item": map[string]any{
-					"type":   "message",
-					"id":     itemID,
-					"role":   "assistant",
-					"status": "in_progress",
+					"id":      itemID,
+					"type":    "message",
+					"status":  "in_progress",
+					"role":    "assistant",
+					"content": []any{},
 				},
 			})
 			writeSSEEvent("response.content_part.added", map[string]any{
@@ -1437,46 +1525,66 @@ func (tp *TransparentProxy) handleRequest(w http.ResponseWriter, r *http.Request
 				"item_id":       itemID,
 				"content_index": 0,
 				"part": map[string]any{
-					"type": "output_text",
-					"text": "",
+					"type":        "output_text",
+					"text":        "",
+					"annotations": []any{},
 				},
 			})
 			sseHasEmittedText = true
 			sseOutputIndex++
 		}
 
-		// SSE line reader using bufio.Reader for proper streaming
-		for {
-			line, err := reader.ReadString('\n')
-			if err != nil && err != io.EOF {
-				break
-			}
-			line = strings.TrimSuffix(line, "\n")
-			line = strings.TrimSuffix(line, "\r")
+			// SSE block-based parser - matches cc-switch take_sse_block pattern.
+			// Accumulates lines into complete SSE events, processes each block as a unit.
+			var sseEventName string
+			var sseDataLines []string
 
-			// Only process data: lines; ignore blank lines and other SSE fields
-			var dataStr string
-			if strings.HasPrefix(line, "data: ") {
-				dataStr = line[6:]
-			} else if strings.HasPrefix(line, "data:") {
-				dataStr = line[5:]
-			} else {
-				if err == io.EOF {
-					break
+			processSSEBlock := func() {
+				if len(sseDataLines) == 0 {
+					return
 				}
-				continue
-			}
+				dataStr := strings.Join(sseDataLines, "\n")
+				sseDataLines = nil
 
-			if dataStr == "[DONE]" {
+				if dataStr == "" {
+					return
+				}
+
+				// [DONE] marker
+				if strings.TrimSpace(dataStr) == "[DONE]" {
 					sseFinalize()
 					lastCompletedEvent = dataStr
-					break
+					return
+				}
+
+				// SSE error event (matches cc-switch: event_name == "error")
+				if sseEventName == "error" {
+					errMsg := "SSE error event received"
+					var parsed map[string]any
+					if err := json.Unmarshal([]byte(dataStr), &parsed); err == nil {
+						if eo, ok := parsed["error"].(map[string]any); ok {
+							if m, ok := eo["message"].(string); ok {
+								errMsg = m
+							}
+						} else if m, ok := parsed["message"].(string); ok {
+							errMsg = m
+						}
+					}
+					writeSSEEvent("response.failed", map[string]any{
+						"response": buildResponseObj("failed", []any{}),
+						"error":    map[string]any{"message": errMsg},
+					})
+					return
 				}
 
 				var eventData map[string]any
-				_ = json.Unmarshal([]byte(dataStr), &eventData)
+				if err := json.Unmarshal([]byte(dataStr), &eventData); err != nil {
+					debugLog("SSE parse error: %v, data: %s", err, dataStr[:min(len(dataStr), 200)])
+					return
+				}
 
 				if convertSSE {
+					// Extract response metadata
 					if id, ok := eventData["id"].(string); ok && sseMessageID == "" {
 						sseMessageID = id
 					}
@@ -1484,6 +1592,7 @@ func (tp *TransparentProxy) handleRequest(w http.ResponseWriter, r *http.Request
 						sseModel = model
 					}
 
+					// Extract usage from final chunk
 					if usage, ok := eventData["usage"].(map[string]any); ok {
 						if v, ok := usage["prompt_tokens"].(float64); ok {
 							extractor.inputTokens = int(v)
@@ -1493,59 +1602,115 @@ func (tp *TransparentProxy) handleRequest(w http.ResponseWriter, r *http.Request
 						}
 					}
 
+					// Check for error in data payload (cc-switch: chunk.get("error"))
+					if errorObj, hasError := eventData["error"]; hasError && errorObj != nil {
+						errMsg := "upstream error in SSE stream"
+						if eo, ok := errorObj.(map[string]any); ok {
+							if m, ok := eo["message"].(string); ok {
+								errMsg = m
+							}
+						}
+						writeSSEEvent("response.failed", map[string]any{
+							"response": buildResponseObj("failed", []any{}),
+							"error":    map[string]any{"message": errMsg},
+						})
+						return
+					}
+
+					// Process choices
 					if choices, ok := eventData["choices"].([]any); ok {
 						for _, c := range choices {
 							choice, _ := c.(map[string]any)
 							delta, _ := choice["delta"].(map[string]any)
-							finishReason, _ := choice["finish_reason"].(string)
 
-							// Tool calls
-							if finishReason == "tool_calls" || (delta["tool_calls"] != nil && !sseHasToolCall) {
-								sseHasToolCall = true
-								if toolCalls, ok := delta["tool_calls"].([]any); ok {
-									for _, tc := range toolCalls {
-										tool, _ := tc.(map[string]any)
-										if fn, ok := tool["function"].(map[string]any); ok {
-											if id, ok := tool["id"].(string); ok && id != "" {
-												if sseToolID != "" {
-													writeSSEEvent("response.output_item.added", map[string]any{
-														"output_index": sseOutputIndex,
-														"item": map[string]any{
-															"type":      "function_call",
-															"id":        sseToolID,
-															"name":      sseToolName,
-															"status":    "completed",
-															"arguments": sseToolArgsBuilder.String(),
-														},
-													})
-													writeSSEEvent("response.function_call_arguments.done", map[string]any{
-														"output_index": sseOutputIndex,
-														"item_id":      sseToolID,
-														"parsed":       nil,
-														"arguments":    sseToolArgsBuilder.String(),
-													})
-													writeSSEEvent("response.output_item.done", map[string]any{
-														"output_index": sseOutputIndex,
-														"item": map[string]any{
-															"type":      "function_call",
-															"id":        sseToolID,
-															"name":      sseToolName,
-															"status":    "completed",
-															"arguments": sseToolArgsBuilder.String(),
-														},
-													})
-													sseOutputIndex++
-												}
-												sseToolID = id
-												sseToolArgsBuilder.Reset()
-											}
-											if name, ok := fn["name"].(string); ok && name != "" {
-												sseToolName = name
-											}
-											if args, ok := fn["arguments"].(string); ok {
-												sseToolArgsBuilder.WriteString(args)
-											}
+							// Check choice-level error
+							if choiceErr, ok := choice["error"]; ok && choiceErr != nil {
+								errMsg := "upstream error in stream"
+								if em, ok := choiceErr.(string); ok {
+									errMsg = em
+								}
+								writeSSEEvent("response.failed", map[string]any{
+									"response": buildResponseObj("failed", []any{}),
+									"error":    map[string]any{"message": errMsg},
+								})
+								continue
+							}
+
+							// Track finish_reason for debugging
+							if fr, ok := choice["finish_reason"].(string); ok && fr != "" {
+								debugLog("SSE finish_reason: %s", fr)
+							}
+
+							// Tool calls - matches cc-switch pushToolCallDelta
+							if toolCalls, ok := delta["tool_calls"].([]any); ok {
+								for _, tc := range toolCalls {
+									tool, _ := tc.(map[string]any)
+									tcIndex := 0
+									if idx, ok := tool["index"].(float64); ok {
+										tcIndex = int(idx)
+									}
+									fn, _ := tool["function"].(map[string]any)
+									callID, _ := tool["id"].(string)
+									nameVal := ""
+									argsVal := ""
+									if fn != nil {
+										nameVal, _ = fn["name"].(string)
+										argsVal, _ = fn["arguments"].(string)
+									}
+
+									ts, exists := sseTools[tcIndex]
+									if !exists {
+										ts = &sseToolState{}
+										sseTools[tcIndex] = ts
+									}
+									if callID != "" {
+										ts.callID = callID
+									}
+									if nameVal != "" {
+										ts.name = nameVal
+									}
+									if argsVal != "" {
+										ts.args.WriteString(argsVal)
+									}
+
+									// First time we have enough info - emit events
+									if !ts.added && (ts.callID != "" || ts.name != "") {
+										ts.added = true
+										if ts.callID == "" {
+											ts.callID = fmt.Sprintf("call_%d", tcIndex)
 										}
+										if ts.name == "" {
+											ts.name = "unknown_tool"
+										}
+										ts.outputIndex = sseOutputIndex
+										ts.itemID = fmt.Sprintf("fc_%s", ts.callID)
+										sseOutputIndex++
+
+										writeSSEEvent("response.output_item.added", map[string]any{
+											"output_index": ts.outputIndex,
+											"item": map[string]any{
+												"id":        ts.itemID,
+												"type":      "function_call",
+												"status":    "in_progress",
+												"call_id":   ts.callID,
+												"name":      ts.name,
+												"arguments": "",
+											},
+										})
+										// Flush buffered arguments
+										if ts.args.Len() > 0 {
+											writeSSEEvent("response.function_call_arguments.delta", map[string]any{
+												"output_index": ts.outputIndex,
+												"item_id":      ts.itemID,
+												"delta":        ts.args.String(),
+											})
+										}
+									} else if ts.added && argsVal != "" {
+										writeSSEEvent("response.function_call_arguments.delta", map[string]any{
+											"output_index": ts.outputIndex,
+											"item_id":      ts.itemID,
+											"delta":        argsVal,
+										})
 									}
 								}
 							}
@@ -1564,7 +1729,7 @@ func (tp *TransparentProxy) handleRequest(w http.ResponseWriter, r *http.Request
 								sseTextContent.WriteString(content)
 							}
 
-							// DeepSeek reasoning_content → separate reasoning item
+							// DeepSeek reasoning_content -> separate reasoning item
 							if rc, ok := delta["reasoning_content"].(string); ok && rc != "" {
 								if !sseHasEmittedReasoning {
 									startReasoningItem()
@@ -1591,13 +1756,49 @@ func (tp *TransparentProxy) handleRequest(w http.ResponseWriter, r *http.Request
 						f.Flush()
 					}
 				}
-
-			if err == io.EOF {
-				break
 			}
-		}
 
-		// Always call finalize at stream end (cc-switch pattern)
+			flushBlock := func() {
+				processSSEBlock()
+				sseEventName = ""
+			}
+
+			for {
+				line, err := reader.ReadString('\n')
+				if err != nil && err != io.EOF {
+					break
+				}
+				line = strings.TrimRight(line, "\r\n")
+
+				// Empty line = end of SSE block
+				if line == "" {
+					if len(sseDataLines) > 0 {
+						flushBlock()
+					}
+					if err == io.EOF {
+						break
+					}
+					continue
+				}
+
+				// Parse SSE fields
+				if strings.HasPrefix(line, "event:") {
+					sseEventName = strings.TrimSpace(line[6:])
+				} else if strings.HasPrefix(line, "data:") {
+					val := line[5:]
+					if len(val) > 0 && val[0] == ' ' {
+						val = val[1:]
+					}
+					sseDataLines = append(sseDataLines, val)
+				}
+
+				if err == io.EOF {
+					if len(sseDataLines) > 0 {
+						flushBlock()
+					}
+					break
+				}
+			}// Always call finalize at stream end (cc-switch pattern)
 		if convertSSE {
 			sseFinalize()
 		}
