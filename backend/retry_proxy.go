@@ -1391,7 +1391,6 @@ func (tp *TransparentProxy) handleRequest(w http.ResponseWriter, r *http.Request
 					"item": map[string]any{
 						"id":     reasoningItemID,
 						"type":   "reasoning",
-						"status": "completed",
 						"summary": []any{
 							map[string]any{"type": "summary_text", "text": sseReasoningContent.String()},
 						},
@@ -1448,7 +1447,6 @@ func (tp *TransparentProxy) handleRequest(w http.ResponseWriter, r *http.Request
 					item: map[string]any{
 						"id":     reasoningItemID,
 						"type":   "reasoning",
-						"status": "completed",
 						"summary": []any{
 							map[string]any{"type": "summary_text", "text": sseReasoningContent.String()},
 						},
@@ -1615,6 +1613,7 @@ func (tp *TransparentProxy) handleRequest(w http.ResponseWriter, r *http.Request
 						"response": buildResponseObj("failed", []any{}),
 						"error":    map[string]any{"message": errMsg},
 					})
+					sseHasCompleted = true
 					return
 				}
 
@@ -1665,6 +1664,7 @@ func (tp *TransparentProxy) handleRequest(w http.ResponseWriter, r *http.Request
 							"response": buildResponseObj("failed", []any{}),
 							"error":    map[string]any{"message": errMsg},
 						})
+						sseHasCompleted = true
 						return
 					}
 
@@ -1684,6 +1684,7 @@ func (tp *TransparentProxy) handleRequest(w http.ResponseWriter, r *http.Request
 									"response": buildResponseObj("failed", []any{}),
 									"error":    map[string]any{"message": errMsg},
 								})
+								sseHasCompleted = true
 								continue
 							}
 
@@ -1788,7 +1789,7 @@ func (tp *TransparentProxy) handleRequest(w http.ResponseWriter, r *http.Request
 								writeSSEEvent("response.reasoning_summary_text.delta", map[string]any{
 									"output_index": sseOutputIndex - 1,
 									"item_id":      sseCurrentItemID,
-									"text":         rc,
+									"delta":         rc,
 								})
 								sseReasoningContent.WriteString(rc)
 							}
