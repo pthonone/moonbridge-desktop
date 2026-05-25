@@ -1222,6 +1222,7 @@ func (tp *TransparentProxy) handleRequest(w http.ResponseWriter, r *http.Request
 		var sseHasEmittedCreated, sseHasCompleted bool
 		var sseHasEmittedText, sseHasEmittedReasoning bool
 		var sseTextContent, sseReasoningContent strings.Builder
+		var sseReasoningOutputIndex, sseTextOutputIndex int // stored output_index for finalize consistency
 		// Tool call state - matches cc-switch BTreeMap<usize, ToolCallState>
 		type sseToolState struct {
 			callID       string
@@ -1368,7 +1369,7 @@ func (tp *TransparentProxy) handleRequest(w http.ResponseWriter, r *http.Request
 
 			// 2. Close reasoning item (cc-switch finalizeReasoning)
 			if sseHasEmittedReasoning {
-				outputIndex := sseOutputIndex - 1
+				outputIndex := sseReasoningOutputIndex
 				reasoningItemID := fmt.Sprintf("rs_%s", sseMessageID)
 				writeSSEEvent("response.reasoning_summary_text.done", map[string]any{
 					"output_index":  outputIndex,
@@ -1400,7 +1401,7 @@ func (tp *TransparentProxy) handleRequest(w http.ResponseWriter, r *http.Request
 
 			// 3. Close text item (cc-switch finalizeText: output_text.done -> content_part.done -> output_item.done)
 			if sseHasEmittedText {
-				outputIndex := sseOutputIndex - 1
+				outputIndex := sseTextOutputIndex
 				textItemID := fmt.Sprintf("%s_msg", sseMessageID)
 				writeSSEEvent("response.output_text.done", map[string]any{
 					"output_index":  outputIndex,
@@ -1443,7 +1444,7 @@ func (tp *TransparentProxy) handleRequest(w http.ResponseWriter, r *http.Request
 			if sseHasEmittedReasoning {
 				reasoningItemID := fmt.Sprintf("rs_%s", sseMessageID)
 				outputList = append(outputList, outputItem{
-					index: -2,
+					index: sseReasoningOutputIndex,
 					item: map[string]any{
 						"id":     reasoningItemID,
 						"type":   "reasoning",
@@ -1458,7 +1459,7 @@ func (tp *TransparentProxy) handleRequest(w http.ResponseWriter, r *http.Request
 			if sseHasEmittedText {
 				textItemID := fmt.Sprintf("%s_msg", sseMessageID)
 				outputList = append(outputList, outputItem{
-					index: -1,
+					index: sseTextOutputIndex,
 					item: map[string]any{
 						"id":     textItemID,
 						"type":   "message",
@@ -1521,6 +1522,7 @@ func (tp *TransparentProxy) handleRequest(w http.ResponseWriter, r *http.Request
 			emitResponseStarted()
 			itemID := fmt.Sprintf("rs_%s", sseMessageID)
 			sseCurrentItemID = itemID
+			sseReasoningOutputIndex = sseOutputIndex
 			writeSSEEvent("response.output_item.added", map[string]any{
 				"output_index": sseOutputIndex,
 				"item": map[string]any{
@@ -1548,6 +1550,7 @@ func (tp *TransparentProxy) handleRequest(w http.ResponseWriter, r *http.Request
 			emitResponseStarted()
 			itemID := fmt.Sprintf("%s_msg", sseMessageID)
 			sseCurrentItemID = itemID
+			sseTextOutputIndex = sseOutputIndex
 			writeSSEEvent("response.output_item.added", map[string]any{
 				"output_index": sseOutputIndex,
 				"item": map[string]any{
@@ -1624,7 +1627,12 @@ func (tp *TransparentProxy) handleRequest(w http.ResponseWriter, r *http.Request
 				if convertSSE {
 					// Extract response metadata
 					if id, ok := eventData["id"].(string); ok && sseMessageID == "" {
-						sseMessageID = id
+							// Normalize response ID to resp_ prefix (matches cc-switch response_id_from_chat_id)
+							if strings.HasPrefix(id, "resp_") {
+								sseMessageID = id
+							} else {
+								sseMessageID = fmt.Sprintf("resp_%s", id)
+							}
 					}
 					if model, ok := eventData["model"].(string); ok && sseModel == "" {
 						sseModel = model
