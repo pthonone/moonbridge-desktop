@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -1217,6 +1218,7 @@ func (tp *TransparentProxy) handleRequest(w http.ResponseWriter, r *http.Request
 
 		// SSE conversion state — matches cc-switch ChatToResponsesState
 		var sseMessageID, sseModel string
+		var sseCreatedAt int64
 		var sseHasEmittedCreated, sseHasCompleted bool
 		var sseHasEmittedText, sseHasEmittedReasoning bool
 		var sseTextContent, sseReasoningContent strings.Builder
@@ -1248,28 +1250,18 @@ func (tp *TransparentProxy) handleRequest(w http.ResponseWriter, r *http.Request
 		}
 
 		buildResponseObj := func(status string, output []any) map[string]any {
+			createdAt := sseCreatedAt
+			if createdAt == 0 {
+				createdAt = time.Now().Unix()
+			}
 			return map[string]any{
-				"id":                    sseMessageID,
-				"object":                "response",
-				"created_at":            time.Now().Unix(),
-				"status":                status,
-				"error":                 nil,
-				"incomplete_details":    nil,
-				"instructions":          nil,
-				"max_output_tokens":     nil,
-				"model":                 sseModel,
-				"parallel_tool_calls":   true,
-				"prompt":                nil,
-				"temperature":           nil,
-				"tool_choice":           "auto",
-				"tools":                 []any{},
-				"top_logprobs":          nil,
-				"top_p":                 nil,
-				"truncation":            "auto",
-				"usage":                 nil,
-				"metadata":              map[string]any{},
-				"user":                  nil,
-				"output":                output,
+				"id":         sseMessageID,
+				"object":     "response",
+				"created_at": createdAt,
+				"status":     status,
+				"model":      sseModel,
+				"output":     output,
+				"usage":      nil,
 			}
 		}
 
@@ -1441,29 +1433,75 @@ func (tp *TransparentProxy) handleRequest(w http.ResponseWriter, r *http.Request
 			}
 
 			// 4. Build output array for response.completed (sorted by output_index)
-			var outputItems []any
+			type outputItem struct {
+				index int
+				item  map[string]any
+			}
+			var outputList []outputItem
+
+			// Add reasoning items
 			if sseHasEmittedReasoning {
 				reasoningItemID := fmt.Sprintf("rs_%s", sseMessageID)
-				outputItems = append(outputItems, map[string]any{
-					"id":     reasoningItemID,
-					"type":   "reasoning",
-					"status": "completed",
-					"summary": []any{
-						map[string]any{"type": "summary_text", "text": sseReasoningContent.String()},
+				outputList = append(outputList, outputItem{
+					index: -2,
+					item: map[string]any{
+						"id":     reasoningItemID,
+						"type":   "reasoning",
+						"status": "completed",
+						"summary": []any{
+							map[string]any{"type": "summary_text", "text": sseReasoningContent.String()},
+						},
 					},
 				})
 			}
+			// Add text items
 			if sseHasEmittedText {
 				textItemID := fmt.Sprintf("%s_msg", sseMessageID)
-				outputItems = append(outputItems, map[string]any{
-					"id":     textItemID,
-					"type":   "message",
-					"status": "completed",
-					"role":   "assistant",
-					"content": []any{
-						map[string]any{"type": "output_text", "text": sseTextContent.String(), "annotations": []any{}},
+				outputList = append(outputList, outputItem{
+					index: -1,
+					item: map[string]any{
+						"id":     textItemID,
+						"type":   "message",
+						"status": "completed",
+						"role":   "assistant",
+						"content": []any{
+							map[string]any{"type": "output_text", "text": sseTextContent.String(), "annotations": []any{}},
+						},
 					},
 				})
+			}
+			// Add tool call items (from sseTools, matching cc-switch finalizeTools)
+			for _, ts := range sseTools {
+				if ts.added && ts.done {
+					if ts.itemID == "" {
+						if ts.callID == "" {
+							ts.callID = "call_0"
+						}
+						ts.itemID = fmt.Sprintf("fc_%s", ts.callID)
+					}
+					if ts.name == "" {
+						ts.name = "unknown_tool"
+					}
+					outputList = append(outputList, outputItem{
+						index: ts.outputIndex,
+						item: map[string]any{
+							"id":        ts.itemID,
+							"type":      "function_call",
+							"status":    "completed",
+							"call_id":   ts.callID,
+							"name":      ts.name,
+							"arguments": ts.args.String(),
+						},
+					})
+				}
+			}
+			// Sort by output_index and build output array
+			sort.Slice(outputList, func(i, j int) bool {
+				return outputList[i].index < outputList[j].index
+			})
+			outputItems := make([]any, len(outputList))
+			for i, oi := range outputList {
+				outputItems[i] = oi.item
 			}
 
 			resp := buildResponseObj("completed", outputItems)
@@ -1590,6 +1628,11 @@ func (tp *TransparentProxy) handleRequest(w http.ResponseWriter, r *http.Request
 					}
 					if model, ok := eventData["model"].(string); ok && sseModel == "" {
 						sseModel = model
+					}
+					if sseCreatedAt == 0 {
+						if created, ok := eventData["created"].(float64); ok {
+							sseCreatedAt = int64(created)
+						}
 					}
 
 					// Extract usage from final chunk
