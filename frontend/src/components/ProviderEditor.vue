@@ -235,8 +235,14 @@ async function handleSave() {
           <div v-for="(m, idx) in form.models" :key="idx" class="model-entry">
             <div class="model-entry-header">
               <span class="model-entry-num">#{{ idx + 1 }}</span>
-              <input v-model="m.name" class="model-entry-name" placeholder="模型名称" />
-              <input v-model="m.series" class="model-entry-series" placeholder="系列" />
+              <div class="model-name-field">
+                <label class="field-label">模型名称</label>
+                <input v-model="m.name" class="model-entry-name" placeholder="例如 qwen3.6-plus" />
+              </div>
+              <div class="model-series-field">
+                <label class="field-label">系列</label>
+                <input v-model="m.series" class="model-entry-series" placeholder="例如 qwen" />
+              </div>
             </div>
             <div class="model-entry-body">
               <div class="body-row">
@@ -376,7 +382,7 @@ async function handleSave() {
 }
 
 .modal-body {
-  padding: 20px 20px 24px;
+  padding: 20px 20px 150px;
   display: flex;
   flex-direction: column;
   gap: 14px;
@@ -492,6 +498,38 @@ async function handleSave() {
   font-weight: 600;
   width: 20px;
   flex-shrink: 0;
+  align-self: flex-end;
+  padding-bottom: 6px;
+}
+
+.model-entry-header {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.model-name-field,
+.model-series-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.model-name-field {
+  flex: 1;
+  min-width: 0;
+}
+
+.model-series-field {
+  width: 90px;
+  flex-shrink: 0;
+}
+
+.field-label {
+  font-size: 11px;
+  color: var(--gray-400);
+  font-weight: 500;
+  line-height: 1;
 }
 
 .model-entry-name {
@@ -512,13 +550,12 @@ async function handleSave() {
 }
 
 .model-entry-series {
-  width: 70px;
+  width: 100%;
   background: white;
   border: 1px solid var(--gray-200);
   border-radius: 6px;
   padding: 6px 8px;
   font-size: 12px;
-  flex-shrink: 0;
 }
 
 .model-entry-series:focus {

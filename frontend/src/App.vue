@@ -5,7 +5,7 @@ import LogViewer from './components/LogViewer.vue'
 import ProviderEditor from './components/ProviderEditor.vue'
 import ModelCard from './components/ModelCard.vue'
 import { EventsOn, EventsOff } from '@wailsjs/runtime/runtime'
-import { GetStatus, StartMoonBridge, StopMoonBridge, GetConfig, GetUsageStats, GetProviderPresets, ListModels, ListProviders, GetUsageDailyStats, GetUsageHourlyStats, GetUsageRecentRecords, GetUsageByModel, ClearUsageToday, ClearUsageAll, IsCodexEnabled, SetCodexEnabled, DeleteModel } from '@wailsjs/go/main/App'
+import { GetStatus, StartProxy, StopProxy, GetConfig, GetUsageStats, GetProviderPresets, ListModels, ListProviders, GetUsageDailyStats, GetUsageHourlyStats, GetUsageRecentRecords, GetUsageByModel, ClearUsageToday, ClearUsageAll, IsCodexEnabled, SetCodexEnabled, DeleteModel } from '@wailsjs/go/main/App'
 
 interface MBStatus { running: boolean; port: number; current_route: string; error: string }
 interface DesktopConfig { port: number; log_level: string; providers: any[]; models: any[]; routes: any[]; default_route: string; max_tokens: number; metrics_enabled: boolean }
@@ -218,7 +218,7 @@ async function handleStart() {
   loading.value = true
   statusError.value = ''
   try {
-    await StartMoonBridge()
+    await StartProxy()
     await refreshStatus()
     startStatsPolling()
   } catch (e: any) {
@@ -231,7 +231,7 @@ async function handleStart() {
 async function handleStop() {
   loading.value = true
   try {
-    await StopMoonBridge()
+    await StopProxy()
     stopStatsPolling()
   } catch (e: any) {
     statusError.value = e.message || String(e)

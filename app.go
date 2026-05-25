@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"embed"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,20 +13,15 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
-//go:embed all:resources
-var resourcesFS embed.FS
-
 // App is the main Wails application struct.
 type App struct {
-	ctx          context.Context
-	configMgr    *backend.ConfigManager
-	codexConfig  *backend.CodexConfig
-	mbProcess    *backend.MBProcess
-	retryProxy   *backend.RetryProxy
-	metricsProxy *backend.MetricsProxy
-	usageStore   *backend.UsageStore
-	config       *backend.DesktopConfig
-	systray      *backend.SystemTray
+	ctx         context.Context
+	configMgr   *backend.ConfigManager
+	codexConfig *backend.CodexConfig
+	proxy       *backend.TransparentProxy
+	usageStore  *backend.UsageStore
+	config      *backend.DesktopConfig
+	systray     *backend.SystemTray
 }
 
 // NewApp creates a new App
@@ -67,7 +61,7 @@ func (a *App) startup(ctx context.Context) {
 	// Sync Codex config on startup if enabled and installed
 	a.syncCodexConfig()
 
-	// Initialize usage store for historical queries (even before bridge starts)
+	// Initialize usage store for historical queries (even before proxy starts)
 	dataDir := a.configMgr.DataDir()
 	usageDir := filepath.Join(dataDir, "data")
 	os.MkdirAll(usageDir, 0755)
@@ -76,7 +70,7 @@ func (a *App) startup(ctx context.Context) {
 	// Start system tray
 	a.startSystray()
 
-	// Forward log entries from MBProcess to frontend
+	// Forward log entries from backend to frontend
 	go func() {
 		for entry := range backend.LogChan() {
 			runtime.EventsEmit(a.ctx, "log-entry", entry)
@@ -85,14 +79,8 @@ func (a *App) startup(ctx context.Context) {
 }
 
 func (a *App) shutdown(ctx context.Context) {
-	if a.mbProcess != nil && a.mbProcess.IsRunning() {
-		_ = a.mbProcess.Stop()
-	}
-	if a.retryProxy != nil {
-		a.retryProxy.Stop()
-	}
-	if a.metricsProxy != nil {
-		a.metricsProxy.Stop()
+	if a.proxy != nil {
+		a.proxy.Stop()
 	}
 	if a.usageStore != nil {
 		_ = a.usageStore.Close()
@@ -108,12 +96,12 @@ func (a *App) startSystray() {
 	a.systray = backend.NewSystemTray()
 	a.systray.SetCallbacks(backend.TrayCallbacks{
 		OnModelSelect: func(alias string) {
-			if a.mbProcess == nil || !a.mbProcess.IsRunning() {
+			if a.proxy == nil || !a.proxy.IsRunning() {
 				if err := a.SwitchModel(alias); err != nil {
 					println("switch model error:", err.Error())
 					return
 				}
-				if err := a.StartMoonBridge(); err != nil {
+				if err := a.StartProxy(); err != nil {
 					println("start service error:", err.Error())
 				}
 			} else {
@@ -129,7 +117,7 @@ func (a *App) startSystray() {
 		},
 		OnExit: func() {
 			if a.ctx != nil {
-				_ = a.StopMoonBridge()
+				_ = a.StopProxy()
 				runtime.Quit(a.ctx)
 			}
 		},
@@ -160,6 +148,9 @@ func (a *App) startSystray() {
 
 // syncRoutes auto-generates one route per provider model.
 func (a *App) syncRoutes() {
+	if a.config == nil {
+		return
+	}
 	existing := make(map[string]bool)
 	routes := make([]backend.RouteConfig, 0)
 	for _, p := range a.config.Providers {
@@ -178,21 +169,40 @@ func (a *App) syncRoutes() {
 	if len(routes) > 0 {
 		// Preserve existing moonbridge route's Model if user customized it
 		mbModel := routes[0].Model
+		mbProvider := routes[0].Provider
 		for _, r := range a.config.Routes {
 			if r.Alias == "moonbridge" && r.Model != "" && r.Model != routes[0].Model {
 				mbModel = r.Model
+				// Find the correct provider for this model
+				for _, p := range a.config.Providers {
+					for _, o := range p.Offers {
+						if o.Model == r.Model {
+							mbProvider = p.Key
+							break
+						}
+					}
+					if mbProvider != routes[0].Provider {
+						break
+					}
+				}
 				break
 			}
 		}
 		routes = append([]backend.RouteConfig{{
 			Alias:    "moonbridge",
 			Model:    mbModel,
-			Provider: routes[0].Provider,
+			Provider: mbProvider,
 		}}, routes...)
 	}
 	a.config.Routes = routes
-	if len(routes) > 0 && a.config.DefaultRoute == "" {
-		a.config.DefaultRoute = routes[0].Alias
+	if len(routes) > 0 {
+		// If DefaultRoute is empty OR no longer exists in routes, reset to first available
+		if a.config.DefaultRoute == "" || !existing[a.config.DefaultRoute] {
+			a.config.DefaultRoute = routes[0].Alias
+		}
+	} else {
+		// No routes available — clear DefaultRoute
+		a.config.DefaultRoute = ""
 	}
 	// Update system tray menu
 	if a.systray != nil {
@@ -203,25 +213,18 @@ func (a *App) syncRoutes() {
 func (a *App) defaultConfig() *backend.DesktopConfig {
 	presets := a.GetProviderPresets()
 	providers := make([]backend.ProviderConfig, 0, len(presets))
-	models := make([]backend.ModelConfig, 0)
 	for _, p := range presets {
 		providers = append(providers, backend.ProviderConfig{
 			Key: p.Key, BaseURL: p.BaseURL, APIKey: "", Protocol: p.Protocol,
 			Version: p.Version, Offers: p.Models,
-		})
-		caps, series := inferModelMetadata(p.Models[0].Model, p.Key)
-		models = append(models, backend.ModelConfig{
-			Slug: p.Models[0].Model, DisplayName: p.Models[0].Model,
-			ContextWindow: 1000000, MaxOutputTokens: 65536,
-			Capabilities: caps, Series: series, Extensions: map[string]bool{},
 		})
 	}
 	return &backend.DesktopConfig{
 		Port:           38440,
 		LogLevel:       "info",
 		Providers:      providers,
-		Models:         models,
-		DefaultRoute:   presets[0].Models[0].Model,
+		Models:         []backend.ModelConfig{},
+		DefaultRoute:   "",
 		MaxTokens:      65536,
 		MetricsEnabled: true,
 	}
@@ -229,117 +232,107 @@ func (a *App) defaultConfig() *backend.DesktopConfig {
 
 // ----- Status -----
 
-// GetStatus returns whether Moon Bridge is running and current config.
+// GetStatus returns whether the proxy is running and current config.
 func (a *App) GetStatus() backend.MBStatus {
-	running := a.mbProcess != nil && a.mbProcess.IsRunning()
+	running := a.proxy != nil && a.proxy.IsRunning()
+	port := 38440
+	currentRoute := ""
+	if a.config != nil {
+		port = a.config.Port
+		currentRoute = a.config.DefaultRoute
+	}
 	return backend.MBStatus{
 		Running:      running,
-		Port:         a.config.Port,
-		CurrentRoute: a.config.DefaultRoute,
+		Port:         port,
+		CurrentRoute: currentRoute,
 	}
 }
 
-// ----- Moon Bridge Lifecycle -----
+// ----- Proxy Lifecycle -----
 
-// StartMoonBridge generates config and starts the proxy.
-func (a *App) StartMoonBridge() error {
+// StartProxy creates and starts the transparent proxy.
+func (a *App) StartProxy() error {
+	// Kill any residual moonbridge processes before starting
+	backend.KillProcesses("moonbridge.exe")
+
+	if a.config == nil {
+		return fmt.Errorf("config not loaded")
+	}
+
+	// Validate SQLite database
 	dataDir := a.configMgr.DataDir()
-
-	// Extract binary if needed
-	binaryPath := filepath.Join(dataDir, "moonbridge.exe")
-	if _, err := os.Stat(binaryPath); os.IsNotExist(err) {
-		if err := backend.ExtractBinary(resourcesFS, binaryPath); err != nil {
-			return fmt.Errorf("extract binary: %w", err)
-		}
-	}
-
-	// Ensure internal port is set
-	internalPort := a.config.InternalPort
-	if internalPort == 0 {
-		internalPort = a.config.Port + 1
-	}
-	a.config.InternalPort = internalPort
-
-	// Generate YAML (uses internal port for MoonBridge)
-	configPath := filepath.Join(dataDir, "config.yml")
-	if err := a.configMgr.GenerateMoonBridgeYAML(a.config); err != nil {
-		return fmt.Errorf("generate config: %w", err)
-	}
-
-	// Create data subdirectory for SQLite
-	os.MkdirAll(filepath.Join(dataDir, "data"), 0755)
-
-	// Validate SQLite database — if corrupted, backup and let MoonBridge recreate
 	dbPath := filepath.Join(dataDir, "data", "moonbridge.db")
 	backend.ValidateAndFixSQLiteDB(dbPath)
 
-	// Start MoonBridge on internal port
-	a.mbProcess = backend.NewMBProcess(internalPort, configPath, binaryPath)
+	// Create transparent proxy
+	a.proxy = backend.NewTransparentProxy(a.config.Port, 3)
 
-	if err := a.mbProcess.Start(); err != nil {
-		return fmt.Errorf("start moonbridge: %w", err)
-	}
+	// Set resolve route callback: model alias → provider config + actual model slug
+	a.proxy.SetResolveRoute(func(alias string) (*backend.ProviderConfig, string, error) {
+		if a.config == nil {
+			return nil, "", fmt.Errorf("config not loaded")
+		}
+		for _, r := range a.config.Routes {
+			if r.Alias == alias {
+				// Find the provider for this route
+				for i := range a.config.Providers {
+					p := &a.config.Providers[i]
+					if p.Key == r.Provider {
+						backend.AppLogger.Printf("[ResolveRoute] %s -> provider=%s model=%s", alias, p.Key, r.Model)
+						return p, r.Model, nil
+					}
+				}
+				return nil, "", fmt.Errorf("provider %q not found for route %q", r.Provider, alias)
+			}
+		}
+		// No route found — try matching alias directly as a model name in provider offers
+		for i := range a.config.Providers {
+			p := &a.config.Providers[i]
+			for _, o := range p.Offers {
+				if o.Model == alias {
+					backend.AppLogger.Printf("[ResolveRoute] %s -> provider=%s (direct match)", alias, p.Key)
+					return p, alias, nil
+				}
+			}
+		}
+		return nil, "", fmt.Errorf("model alias %q not found in routes or providers", alias)
+	})
 
-	// Start retry proxy on external port -> internal port
-	a.retryProxy = backend.NewRetryProxy(a.config.Port, internalPort, 3)
-	if err := a.retryProxy.Start(); err != nil {
-		a.mbProcess.Stop()
-		return fmt.Errorf("start retry proxy: %w", err)
-	}
-
-	// Start metrics polling (use internal port since MoonBridge listens there)
-	a.metricsProxy = backend.NewMetricsProxy(internalPort)
-	a.metricsProxy.Start()
-
-	// Connect retry proxy to usage store (usageStore already initialized in startup)
-	a.retryProxy.SetRecordUsage(func(model string, inputTokens, outputTokens, cacheRead, cacheWrite int) {
+	// Connect to usage store
+	a.proxy.SetRecordUsage(func(model string, inputTokens, outputTokens, cacheRead, cacheWrite int) {
 		if a.usageStore != nil {
 			a.usageStore.AddUsage(model, inputTokens, outputTokens, cacheRead, cacheWrite)
 		}
 	})
-	a.retryProxy.SetRecordRequest(func(model string) {
+	a.proxy.SetRecordRequest(func(model string) {
 		if a.usageStore != nil {
 			a.usageStore.AddUsage(model, 0, 0, 0, 0)
 		}
 	})
-	a.retryProxy.SetResolveModel(func(alias string) string {
-		if a.config != nil {
-			for _, r := range a.config.Routes {
-				if r.Alias == alias {
-					resolved := r.Model
-					backend.AppLogger.Printf("[ResolveModel] %s -> %s", alias, resolved)
-					return resolved
-				}
-			}
-		}
-		// No route found — use the alias as-is (it's likely the actual model name)
-		backend.AppLogger.Printf("[ResolveModel] %s -> %s (no route, returning alias)", alias, alias)
-		return alias
-	})
-	a.retryProxy.SetGetCurrentModel(func() string {
+	a.proxy.SetGetCurrentModel(func() string {
 		if a.config != nil {
 			return a.config.DefaultRoute
 		}
 		return ""
 	})
 
+	if err := a.proxy.Start(); err != nil {
+		a.proxy = nil
+		return fmt.Errorf("start transparent proxy: %w", err)
+	}
+
 	return nil
 }
 
-// StopMoonBridge stops the proxy.
-func (a *App) StopMoonBridge() error {
-	if a.mbProcess == nil || !a.mbProcess.IsRunning() {
+// StopProxy stops the transparent proxy.
+func (a *App) StopProxy() error {
+	if a.proxy == nil || !a.proxy.IsRunning() {
 		return fmt.Errorf("not running")
 	}
-	if a.retryProxy != nil {
-		a.retryProxy.Stop()
-	}
-	if a.metricsProxy != nil {
-		a.metricsProxy.Stop()
-	}
-	err := a.mbProcess.Stop()
+	a.proxy.Stop()
+	a.proxy = nil
 	backend.KillProcesses("moonbridge.exe")
-	return err
+	return nil
 }
 
 // ----- Config -----
@@ -365,17 +358,13 @@ func (a *App) GetConfig() backend.DesktopConfig {
 	return *a.config
 }
 
-// SaveConfig saves the desktop config and regenerates YAML if running.
+// SaveConfig saves the desktop config and syncs Codex. No restart needed — provider changes are instant.
 func (a *App) SaveConfig(cfg backend.DesktopConfig) error {
 	a.config = &cfg
 	if err := a.configMgr.SaveConfig(a.config); err != nil {
 		return err
 	}
-	// If running, regenerate YAML and restart
-	if a.mbProcess != nil && a.mbProcess.IsRunning() {
-		_ = a.StopMoonBridge()
-		return a.StartMoonBridge()
-	}
+	a.syncCodexConfig()
 	return nil
 }
 
@@ -422,9 +411,13 @@ func (a *App) DeleteModel(slug string) error {
 		return fmt.Errorf("模型 '%s' 不存在", slug)
 	}
 	a.config.Models = newModels
-	// If the deleted model was the default, reset to first available
-	if a.config.DefaultRoute == slug && len(a.config.Models) > 0 {
-		a.config.DefaultRoute = a.config.Models[0].Slug
+	// If the deleted model was the default, reset to first available or empty
+	if a.config.DefaultRoute == slug {
+		if len(a.config.Models) > 0 {
+			a.config.DefaultRoute = a.config.Models[0].Slug
+		} else {
+			a.config.DefaultRoute = ""
+		}
 	}
 	a.syncRoutes()
 	_ = a.configMgr.SaveConfig(a.config)
@@ -440,7 +433,7 @@ func (a *App) ListProviders() []backend.ProviderConfig {
 	return a.config.Providers
 }
 
-// AddProvider adds a new provider.
+// AddProvider adds a new provider. Changes take effect immediately — no restart needed.
 func (a *App) AddProvider(p backend.ProviderConfig) error {
 	if err := a.ensureConfigLoaded(); err != nil {
 		return err
@@ -452,8 +445,10 @@ func (a *App) AddProvider(p backend.ProviderConfig) error {
 		}
 	}
 	a.config.Providers = append(a.config.Providers, p)
+	backend.AppLogger.Printf("[AddProvider] key=%s, offers=%d", p.Key, len(p.Offers))
 	// Auto-add models from provider offers
 	a.ensureModelsFromOffers()
+	backend.AppLogger.Printf("[AddProvider] after ensureModelsFromOffers: models=%d", len(a.config.Models))
 	a.syncRoutes()
 	_ = a.configMgr.SaveConfig(a.config)
 	a.syncCodexConfig()
@@ -463,9 +458,8 @@ func (a *App) AddProvider(p backend.ProviderConfig) error {
 // ensureModelsFromOffers rebuilds Models from all provider offers,
 // preserving context_window and other user-edited fields for existing models.
 func (a *App) ensureModelsFromOffers() {
-	// Build offer map: model slug -> first matching offer
 	type offerInfo struct {
-		offer backend.OfferConfig
+		offer       backend.OfferConfig
 		providerKey string
 	}
 	offerMap := make(map[string]offerInfo)
@@ -486,13 +480,11 @@ func (a *App) ensureModelsFromOffers() {
 	}
 
 	var kept []backend.ModelConfig
-	// Track order: maintain existing order for models still in offers, append new ones
 	seenOrder := make(map[string]bool)
 	// First pass: existing models still offered (preserve order)
 	for _, m := range a.config.Models {
 		if info, ok := offerMap[m.Slug]; ok {
 			o := info.offer
-			// Update all fields from offer
 			m.Series = o.Series
 			m.Capabilities = o.Capabilities
 			kept = append(kept, m)
@@ -533,7 +525,7 @@ func (a *App) ensureModelsFromOffers() {
 	a.config.Models = kept
 }
 
-// UpdateProvider updates an existing provider by key.
+// UpdateProvider updates an existing provider by key. Changes take effect immediately.
 func (a *App) UpdateProvider(key string, p backend.ProviderConfig) error {
 	if err := a.ensureConfigLoaded(); err != nil {
 		return err
@@ -551,7 +543,7 @@ func (a *App) UpdateProvider(key string, p backend.ProviderConfig) error {
 	return fmt.Errorf("provider not found: %s", key)
 }
 
-// DeleteProvider removes a provider by key.
+// DeleteProvider removes a provider by key. Changes take effect immediately.
 func (a *App) DeleteProvider(key string) error {
 	if err := a.ensureConfigLoaded(); err != nil {
 		return err
@@ -574,15 +566,19 @@ func (a *App) DeleteProvider(key string) error {
 			existing[o.Model] = true
 		}
 	}
-	if !existing[a.config.DefaultRoute] && len(a.config.Routes) > 0 {
-		a.config.DefaultRoute = a.config.Routes[0].Alias
+	if !existing[a.config.DefaultRoute] {
+		if len(a.config.Routes) > 0 {
+			a.config.DefaultRoute = a.config.Routes[0].Alias
+		} else {
+			a.config.DefaultRoute = ""
+		}
 	}
 	_ = a.configMgr.SaveConfig(a.config)
 	a.syncCodexConfig()
 	return nil
 }
 
-// SwitchModel changes the active route to use a different model.
+// SwitchModel changes the active route to use a different model. Changes take effect immediately.
 func (a *App) SwitchModel(routeAlias string) error {
 	backend.AppLogger.Printf("[SwitchModel] switching to: %s", routeAlias)
 	if err := a.ensureConfigLoaded(); err != nil {
@@ -612,10 +608,22 @@ func (a *App) SwitchModel(routeAlias string) error {
 
 	// Add "moonbridge" as a fallback alias for Codex compatibility
 	if len(routes) > 0 {
+		mbProvider := routes[0].Provider
+		for _, p := range a.config.Providers {
+			for _, o := range p.Offers {
+				if o.Model == routeAlias {
+					mbProvider = p.Key
+					break
+				}
+			}
+			if mbProvider != routes[0].Provider {
+				break
+			}
+		}
 		routes = append([]backend.RouteConfig{{
 			Alias:    "moonbridge",
 			Model:    routeAlias,
-			Provider: routes[0].Provider,
+			Provider: mbProvider,
 		}}, routes...)
 	}
 
@@ -634,11 +642,7 @@ func (a *App) SwitchModel(routeAlias string) error {
 	if a.systray != nil {
 		a.systray.UpdateMenu()
 	}
-	// If running, restart with new config
-	if a.mbProcess != nil && a.mbProcess.IsRunning() {
-		_ = a.StopMoonBridge()
-		return a.StartMoonBridge()
-	}
+
 	return nil
 }
 
@@ -646,9 +650,6 @@ func (a *App) SwitchModel(routeAlias string) error {
 func (a *App) GetUsageStats() backend.UsageStats {
 	if a.usageStore != nil {
 		return a.usageStore.GetTodayStats()
-	}
-	if a.metricsProxy != nil {
-		return a.metricsProxy.GetStats()
 	}
 	return backend.UsageStats{}
 }

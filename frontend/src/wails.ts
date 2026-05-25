@@ -8,8 +8,8 @@ function assertGo() {
 }
 
 export const GetStatus          = () => { assertGo(); return go.GetStatus() }
-export const StartMoonBridge    = () => { assertGo(); return go.StartMoonBridge() }
-export const StopMoonBridge     = () => { assertGo(); return go.StopMoonBridge() }
+export const StartProxy         = () => { assertGo(); return go.StartProxy() }
+export const StopProxy          = () => { assertGo(); return go.StopProxy() }
 export const GetConfig          = () => { assertGo(); return go.GetConfig() }
 export const SaveConfig         = (a1: any) => { assertGo(); return go.SaveConfig(a1) }
 export const ListModels         = () => { assertGo(); return go.ListModels() }

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -15,117 +16,208 @@ import (
 	"time"
 )
 
+// debugLogFile is a file-based logger for proxy debugging.
+var debugLogFile *log.Logger
+var debugLogInit sync.Once
+
+func initDebugLog() {
+	debugLogInit.Do(func() {
+		logPath := filepath.Join(os.TempDir(), "moonbridge-proxy-debug.log")
+		f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+		if err != nil {
+			return
+		}
+		debugLogFile = log.New(f, "", 0)
+	})
+}
+
+func debugLog(format string, args ...interface{}) {
+	initDebugLog()
+	if debugLogFile != nil {
+		debugLogFile.Printf(format, args...)
+	}
+}
+
 // RecordUsageFunc is called when usage data is extracted from a response.
 type RecordUsageFunc func(model string, inputTokens, outputTokens, cacheRead, cacheWrite int)
 
 // RecordRequestFunc is called for every successful request (for per-request billing).
 type RecordRequestFunc func(model string)
 
-// RetryProxy is an HTTP reverse proxy that automatically retries 502 errors.
-type RetryProxy struct {
+// TransparentProxy is an HTTP reverse proxy that resolves model aliases to
+// upstream providers, forwards requests directly, and retries on 502 errors.
+type TransparentProxy struct {
 	mu              sync.Mutex
 	listenPort      int
-	targetPort      int
 	maxRetries      int
 	server          *http.Server
 	running         bool
 	recordUsage     RecordUsageFunc
 	recordRequest   RecordRequestFunc
-	resolveModel    func(alias string) string    // resolves route alias to actual model name
-	getCurrentModel func() string                // returns the user's currently selected model alias
+	resolveRoute    func(alias string) (*ProviderConfig, string, error)
+	getCurrentModel func() string
 }
 
-// NewRetryProxy creates a retry proxy that listens on listenPort
-// and forwards requests to targetPort.
-func NewRetryProxy(listenPort, targetPort int, maxRetries int) *RetryProxy {
+// NewTransparentProxy creates a transparent proxy listening on listenPort.
+func NewTransparentProxy(listenPort int, maxRetries int) *TransparentProxy {
 	if maxRetries <= 0 {
 		maxRetries = 3
 	}
-	return &RetryProxy{
+	return &TransparentProxy{
 		listenPort: listenPort,
-		targetPort: targetPort,
 		maxRetries: maxRetries,
 	}
 }
 
 // SetRecordUsage sets the callback for recording usage data.
-func (rp *RetryProxy) SetRecordUsage(fn RecordUsageFunc) {
-	rp.mu.Lock()
-	defer rp.mu.Unlock()
-	rp.recordUsage = fn
+func (tp *TransparentProxy) SetRecordUsage(fn RecordUsageFunc) {
+	tp.mu.Lock()
+	defer tp.mu.Unlock()
+	tp.recordUsage = fn
 }
 
 // SetRecordRequest sets the callback for recording per-request billing.
-func (rp *RetryProxy) SetRecordRequest(fn RecordRequestFunc) {
-	rp.mu.Lock()
-	defer rp.mu.Unlock()
-	rp.recordRequest = fn
+func (tp *TransparentProxy) SetRecordRequest(fn RecordRequestFunc) {
+	tp.mu.Lock()
+	defer tp.mu.Unlock()
+	tp.recordRequest = fn
 }
 
-// SetResolveModel sets the function that maps route aliases to actual model names.
-func (rp *RetryProxy) SetResolveModel(fn func(alias string) string) {
-	rp.mu.Lock()
-	defer rp.mu.Unlock()
-	rp.resolveModel = fn
+// SetResolveRoute sets the function that resolves a model alias to a provider and actual model slug.
+func (tp *TransparentProxy) SetResolveRoute(fn func(alias string) (*ProviderConfig, string, error)) {
+	tp.mu.Lock()
+	defer tp.mu.Unlock()
+	tp.resolveRoute = fn
 }
 
-// SetGetCurrentModel sets the function that returns the user's currently selected model.
-func (rp *RetryProxy) SetGetCurrentModel(fn func() string) {
-	rp.mu.Lock()
-	defer rp.mu.Unlock()
-	rp.getCurrentModel = fn
+// SetGetCurrentModel sets the function that returns the user's currently selected model alias.
+func (tp *TransparentProxy) SetGetCurrentModel(fn func() string) {
+	tp.mu.Lock()
+	defer tp.mu.Unlock()
+	tp.getCurrentModel = fn
 }
 
 // Start begins listening for HTTP requests.
-func (rp *RetryProxy) Start() error {
-	rp.mu.Lock()
-	defer rp.mu.Unlock()
+func (tp *TransparentProxy) Start() error {
+	tp.mu.Lock()
+	defer tp.mu.Unlock()
 
-	if rp.running {
+	if tp.running {
 		return nil
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", rp.handleRequest)
+	mux.HandleFunc("/", tp.handleRequest)
 
-	rp.server = &http.Server{
-		Addr:    fmt.Sprintf("127.0.0.1:%d", rp.listenPort),
+	tp.server = &http.Server{
+		Addr:    fmt.Sprintf("127.0.0.1:%d", tp.listenPort),
 		Handler: mux,
 	}
 
-	rp.running = true
+	tp.running = true
 
 	go func() {
-		if err := rp.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			AppLogger.Printf("[RetryProxy] server error: %v", err)
+		if err := tp.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			AppLogger.Printf("[TransparentProxy] server error: %v", err)
 		}
-		rp.mu.Lock()
-		rp.running = false
-		rp.mu.Unlock()
+		tp.mu.Lock()
+		tp.running = false
+		tp.mu.Unlock()
 	}()
 
 	return nil
 }
 
-// Stop shuts down the retry proxy.
-func (rp *RetryProxy) Stop() error {
-	rp.mu.Lock()
-	defer rp.mu.Unlock()
+// Stop shuts down the transparent proxy.
+func (tp *TransparentProxy) Stop() error {
+	tp.mu.Lock()
+	defer tp.mu.Unlock()
 
-	if !rp.running || rp.server == nil {
+	if !tp.running || tp.server == nil {
 		return nil
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	return rp.server.Shutdown(ctx)
+	return tp.server.Shutdown(ctx)
 }
 
 // IsRunning returns whether the proxy is currently listening.
-func (rp *RetryProxy) IsRunning() bool {
-	rp.mu.Lock()
-	defer rp.mu.Unlock()
-	return rp.running
+func (tp *TransparentProxy) IsRunning() bool {
+	tp.mu.Lock()
+	defer tp.mu.Unlock()
+	return tp.running
+}
+
+// upstreamPathMapping maps incoming request paths to upstream provider paths
+// based on the provider's protocol. Returns the path WITHOUT /v1 prefix
+// when base_url already contains it (matching cc-switch behavior).
+func upstreamPathMapping(incomingPath, protocol string) string {
+	switch {
+	case incomingPath == "/v1/responses" && protocol == "anthropic":
+		return "/messages"
+	case incomingPath == "/v1/responses" && protocol == "openai-chat":
+		return "/chat/completions"
+	case incomingPath == "/v1/responses" && protocol == "openai-response":
+		return "/responses"
+	case strings.HasPrefix(incomingPath, "/v1/responses/") && protocol == "anthropic":
+		return "/messages" + strings.TrimPrefix(incomingPath, "/v1/responses")
+	case strings.HasPrefix(incomingPath, "/v1/responses/") && protocol == "openai-chat":
+		return "/chat/completions"
+	case strings.HasPrefix(incomingPath, "/v1/responses/") && protocol == "openai-response":
+		return incomingPath
+	default:
+		return incomingPath
+	}
+}
+
+// buildUpstreamURL constructs the upstream URL, deduplicating /v1 prefixes.
+// Matching cc-switch's adapter.build_url() logic.
+func buildUpstreamURL(baseURL, upstreamPath string) string {
+	// Case 1: base_url ends with /v1
+	if strings.HasSuffix(baseURL, "/v1") {
+		return baseURL + upstreamPath
+	}
+	// Case 2: base_url ends with /v1/
+	if strings.HasSuffix(baseURL, "/v1/") {
+		return baseURL + strings.TrimPrefix(upstreamPath, "/")
+	}
+	// Case 3: base_url has no path (pure origin)
+	if strings.HasSuffix(baseURL, "/") && !strings.Contains(strings.TrimSuffix(baseURL, "/"), "/") {
+		return baseURL + "v1" + upstreamPath
+	}
+	// Case 4: base_url has a custom prefix - direct concatenation
+	result := baseURL + upstreamPath
+	// Deduplicate /v1/v1 → /v1
+	for strings.Contains(result, "/v1/v1") {
+		result = strings.Replace(result, "/v1/v1", "/v1", -1)
+	}
+	return result
+}
+
+// setProviderAuthHeaders sets the appropriate auth headers based on provider protocol.
+func setProviderAuthHeaders(req *http.Request, provider *ProviderConfig) {
+	switch provider.Protocol {
+	case "anthropic":
+		req.Header.Set("x-api-key", provider.APIKey)
+		if provider.Version != "" {
+			req.Header.Set("anthropic-version", provider.Version)
+		}
+		req.Header.Set("content-type", "application/json")
+	case "openai-chat", "openai-response", "google-genai":
+		req.Header.Set("Authorization", "Bearer "+provider.APIKey)
+	default:
+		// Default to OpenAI-style Bearer auth
+		req.Header.Set("Authorization", "Bearer "+provider.APIKey)
+	}
+}
+
+// stripClientAuthHeaders removes client-provided auth headers so the proxy
+// can replace them with the provider's own credentials.
+func stripClientAuthHeaders(headers http.Header) {
+	for _, key := range []string{"Authorization", "authorization", "X-Api-Key", "x-api-key", "Anthropic-Version", "anthropic-version", "X-Goog-Api-Key", "x-goog-api-key"} {
+		headers.Del(key)
+	}
 }
 
 // Anthropic-style usage (non-streaming)
@@ -151,7 +243,7 @@ type responseUsageOpenAI struct {
 	} `json:"usage"`
 }
 
-// OpenAI Responses API usage (non-streaming, moonbridge)
+// OpenAI Responses API usage (non-streaming)
 type responseUsageResponses struct {
 	Model string `json:"model"`
 	Usage struct {
@@ -181,41 +273,33 @@ type SSEUsageExtractor struct {
 	model        string
 }
 
-func (e *SSEUsageExtractor) recordUsage(rp *RetryProxy) {
-	rp.mu.Lock()
-	defer rp.mu.Unlock()
+func (e *SSEUsageExtractor) recordUsage(tp *TransparentProxy) {
+	tp.mu.Lock()
+	defer tp.mu.Unlock()
 	model := e.model
-	if rp.resolveModel != nil {
-		model = rp.resolveModel(e.model)
-	}
 	if model == "" {
 		return
 	}
-	if rp.recordUsage != nil && (e.inputTokens > 0 || e.outputTokens > 0) {
-		rp.recordUsage(model, e.inputTokens, e.outputTokens, e.cacheRead, e.cacheWrite)
+	if tp.recordUsage != nil && (e.inputTokens > 0 || e.outputTokens > 0) {
+		tp.recordUsage(model, e.inputTokens, e.outputTokens, e.cacheRead, e.cacheWrite)
 	}
 }
 
 // recordPerRequest records a per-request billing event.
-func (e *SSEUsageExtractor) recordPerRequest(rp *RetryProxy) {
-	rp.mu.Lock()
-	defer rp.mu.Unlock()
+func (e *SSEUsageExtractor) recordPerRequest(tp *TransparentProxy) {
+	tp.mu.Lock()
+	defer tp.mu.Unlock()
 	model := e.model
-	if rp.resolveModel != nil {
-		model = rp.resolveModel(e.model)
-	}
 	if model == "" {
 		return
 	}
-	if rp.recordRequest != nil {
-		rp.recordRequest(model)
+	if tp.recordRequest != nil {
+		tp.recordRequest(model)
 	}
 }
 
 // parseAnthropicSSE parses Anthropic-style SSE events for usage data.
-// Extracts model from message_start events, usage from message_delta/message_stop.
 func (e *SSEUsageExtractor) parseAnthropicSSE(data string) {
-	// Extract model from message_start
 	if strings.Contains(data, `"message_start"`) || strings.Contains(data, `"type":"message_start"`) {
 		var msg struct {
 			Message struct {
@@ -265,8 +349,6 @@ func (e *SSEUsageExtractor) parseAnthropicSSE(data string) {
 }
 
 // parseOpenAIResponsesSSE parses OpenAI Responses API SSE events for usage data.
-// Usage appears in "response.completed" event with fields:
-// {"type":"response.completed","response":{"usage":{"input_tokens":N,"output_tokens":N,"input_tokens_details":{"cached_tokens":N}}}}
 func (e *SSEUsageExtractor) parseOpenAIResponsesSSE(data string) {
 	if !strings.Contains(data, `"response.completed"`) && !strings.Contains(data, `"type":"response.completed"`) {
 		return
@@ -319,7 +401,6 @@ func (e *SSEUsageExtractor) parseOpenAISSE(data string) {
 }
 
 // sanitizeTools removes tools with empty names from the request body.
-// Codex sometimes sends tools with empty function.name, causing upstream 502.
 func sanitizeTools(originalBody []byte, toolsRaw json.RawMessage) []byte {
 	var tools []map[string]any
 	if err := json.Unmarshal(toolsRaw, &tools); err != nil {
@@ -352,7 +433,6 @@ func sanitizeTools(originalBody []byte, toolsRaw json.RawMessage) []byte {
 }
 
 // getToolName extracts the name from a tool object.
-// Handles both {"type":"function","function":{"name":"..."}} and {"type":"function","name":"..."}.
 func getToolName(t map[string]any) string {
 	if fn, ok := t["function"].(map[string]any); ok {
 		if name, _ := fn["name"].(string); name != "" {
@@ -365,7 +445,575 @@ func getToolName(t map[string]any) string {
 	return ""
 }
 
-func (rp *RetryProxy) handleRequest(w http.ResponseWriter, r *http.Request) {
+// convertPromptToMessages transforms a Codex-style request body
+// (with "prompt" field) into the standard messages format.
+// Returns the rewritten body if conversion happened, original otherwise.
+func convertPromptToMessages(bodyBytes []byte) []byte {
+	var body map[string]any
+	if err := json.Unmarshal(bodyBytes, &body); err != nil {
+		return bodyBytes
+	}
+
+	_, hasPrompt := body["prompt"]
+	_, hasMessages := body["messages"]
+	if !hasPrompt || hasMessages {
+		return bodyBytes
+	}
+
+	promptVal := body["prompt"]
+	if promptVal == nil {
+		return bodyBytes
+	}
+
+	delete(body, "prompt")
+	body["messages"] = []map[string]any{
+		{"role": "user", "content": promptVal},
+	}
+
+	if rewritten, err := json.Marshal(body); err == nil {
+		return rewritten
+	}
+	return bodyBytes
+}
+
+// convertOpenAItoAnthropic is kept for backward compatibility but deprecated.
+// All protocol conversion now goes through convertOpenAItoChatCompletions.
+func convertOpenAItoAnthropic(bodyBytes []byte) []byte {
+	return convertOpenAItoChatCompletions(bodyBytes)
+}
+
+// convertOpenAItoChatCompletions adapts an OpenAI Responses API request body to
+// OpenAI Chat Completions format for upstream providers that use openai-chat protocol.
+func convertOpenAItoChatCompletions(bodyBytes []byte) []byte {
+	var body map[string]any
+	if err := json.Unmarshal(bodyBytes, &body); err != nil {
+		return bodyBytes
+	}
+
+	// instructions → system message
+	var messages []any
+	if instructions, ok := body["instructions"].(string); ok && instructions != "" {
+		messages = append(messages, map[string]any{
+			"role":    "system",
+			"content": instructions,
+		})
+	}
+	delete(body, "instructions")
+
+	// input → messages
+	if input, ok := body["input"]; ok {
+		delete(body, "input")
+		for _, msg := range responsesInputToMessagesForChat(input) {
+			messages = append(messages, msg)
+		}
+	}
+
+	if len(messages) > 0 {
+		body["messages"] = messages
+	}
+
+	// Always enable streaming when converting to Chat Completions format,
+	// since Codex expects SSE and we convert it back to Responses API SSE.
+	body["stream"] = true
+
+	// tools: Responses flat format → Chat Completions nested format
+	// Responses: {"type": "function", "name": "...", "parameters": ...}
+	// Chat Completions: {"type": "function", "function": {"name": "...", "parameters": ...}}
+	if tools, ok := body["tools"].([]any); ok {
+		converted := make([]any, 0, len(tools))
+		for _, t := range tools {
+			m, ok := t.(map[string]any)
+			if !ok {
+				continue
+			}
+			if m["type"] != "function" {
+				continue
+			}
+			fnDef := make(map[string]any)
+			if name, ok := m["name"].(string); ok {
+				fnDef["name"] = name
+			}
+			if desc, ok := m["description"].(string); ok {
+				fnDef["description"] = desc
+			}
+			if params, ok := m["parameters"]; ok {
+				fnDef["parameters"] = params
+			}
+			converted = append(converted, map[string]any{
+				"type":     "function",
+				"function": fnDef,
+			})
+		}
+		if len(converted) > 0 {
+			body["tools"] = converted
+		} else {
+			delete(body, "tools")
+			delete(body, "tool_choice")
+		}
+	}
+
+	// tool_choice mapping
+	if tc, ok := body["tool_choice"]; ok {
+		body["tool_choice"] = mapToolChoiceToChatCompletions(tc)
+	}
+
+	// Remove Responses API specific fields
+	for _, key := range []string{"include", "stream_options", "user", "reasoning", "truncation", "store", "service_tier", "prompt_cache_key", "max_tokens"} {
+		delete(body, key)
+	}
+	delete(body, "parallel_tool_calls")
+
+	// max_output_tokens → max_tokens
+	if v, ok := body["max_output_tokens"]; ok {
+		delete(body, "max_output_tokens")
+		body["max_tokens"] = v
+	}
+
+	if rewritten, err := json.Marshal(body); err == nil {
+		return rewritten
+	}
+	return bodyBytes
+}
+
+// mapToolChoiceToChatCompletions converts OpenAI Responses tool_choice to Chat Completions format.
+func mapToolChoiceToChatCompletions(tc any) any {
+	switch v := tc.(type) {
+	case string:
+		switch v {
+		case "required", "auto", "none":
+			return v
+		default:
+			return "auto"
+		}
+	case map[string]any:
+		typ, _ := v["type"].(string)
+		switch typ {
+		case "function":
+			if name, ok := v["name"].(string); ok {
+				return map[string]any{"type": "function", "function": map[string]any{"name": name}}
+			}
+			return "required"
+		case "required", "auto", "none":
+			return v["type"]
+		default:
+			return "auto"
+		}
+	}
+	return "auto"
+}
+
+// responsesInputToMessagesForChat converts OpenAI Responses API input to
+// Chat Completions messages format (simple string content, proper roles).
+func responsesInputToMessagesForChat(input any) []map[string]any {
+	items, ok := input.([]any)
+	if !ok {
+		if s, ok := input.(string); ok {
+			return []map[string]any{{"role": "user", "content": s}}
+		}
+		return nil
+	}
+
+	var messages []map[string]any
+	for _, item := range items {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		itemType, _ := m["type"].(string)
+
+		switch itemType {
+		case "message", "":
+			// Map role: developer → system, other roles as-is
+			role, _ := m["role"].(string)
+			if role == "" {
+				role = "user"
+			}
+			if role == "developer" {
+				role = "system"
+			}
+
+			// Flatten content blocks to simple string
+			if contentArr, ok := m["content"].([]any); ok {
+				var textParts []string
+				for _, c := range contentArr {
+					cb, ok := c.(map[string]any)
+					if !ok {
+						continue
+					}
+					if t, ok := cb["type"].(string); ok {
+						if t == "input_text" || t == "output_text" || t == "text" {
+							if txt, ok := cb["text"].(string); ok {
+								textParts = append(textParts, txt)
+							}
+						}
+					}
+				}
+				if len(textParts) > 0 {
+					messages = append(messages, map[string]any{
+						"role":    role,
+						"content": strings.Join(textParts, "\n"),
+					})
+				}
+			} else if s, ok := m["content"].(string); ok {
+				messages = append(messages, map[string]any{
+					"role":    role,
+					"content": s,
+				})
+			}
+
+		case "function_call":
+			// Convert to assistant message with tool_calls format
+			callID, _ := m["call_id"].(string)
+			name, _ := m["name"].(string)
+			if name == "" {
+				continue
+			}
+			args := "{}"
+			if argsStr, ok := m["arguments"].(string); ok {
+				args = argsStr
+			}
+			messages = append(messages, map[string]any{
+				"role": "assistant",
+				"tool_calls": []map[string]any{
+					{
+						"id":   callID,
+						"type": "function",
+						"function": map[string]any{
+							"name":      name,
+							"arguments": args,
+						},
+					},
+				},
+			})
+
+		case "function_call_output":
+			// Convert to tool message with tool_call_id
+			callID, _ := m["call_id"].(string)
+			output := ""
+			if s, ok := m["output"].(string); ok {
+				output = s
+			}
+			messages = append(messages, map[string]any{
+				"role":         "tool",
+				"tool_call_id": callID,
+				"content":      output,
+			})
+		}
+	}
+	return messages
+}
+
+// responsesInputToMessages converts OpenAI Responses API input array to Anthropic messages.
+func responsesInputToMessages(input any) []map[string]any {
+	items, ok := input.([]any)
+	if !ok {
+		if s, ok := input.(string); ok {
+			return []map[string]any{{"role": "user", "content": s}}
+		}
+		return nil
+	}
+
+	var messages []map[string]any
+	var currentRole string
+	var currentContent []any
+
+	flush := func() {
+		if currentRole != "" && len(currentContent) > 0 {
+			messages = append(messages, map[string]any{
+				"role":    currentRole,
+				"content": currentContent,
+			})
+		}
+		currentRole = ""
+		currentContent = nil
+	}
+
+	for _, item := range items {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		itemType, _ := m["type"].(string)
+
+		switch itemType {
+		case "message":
+			// message item: {"type": "message", "role": "user"/"assistant", "content": [...]}
+			role, _ := m["role"].(string)
+			if role == "" {
+				role = "user"
+			}
+			// Flush if role changed
+			if currentRole != "" && role != currentRole {
+				flush()
+			}
+			currentRole = role
+
+			// Convert content blocks
+			if contentArr, ok := m["content"].([]any); ok {
+				for _, c := range contentArr {
+					cb := responsesContentToAnthropic(c)
+					if cb != nil {
+						currentContent = append(currentContent, cb)
+					}
+				}
+			}
+
+		case "function_call":
+			// Elevated function call → tool_use block in assistant message
+			if currentRole != "" && currentRole != "assistant" {
+				flush()
+			}
+			currentRole = "assistant"
+
+			callID, _ := m["call_id"].(string)
+			name, _ := m["name"].(string)
+			if name == "" {
+				continue
+			}
+			toolUse := map[string]any{
+				"type": "tool_use",
+				"id":   callID,
+				"name": name,
+			}
+			if argsStr, ok := m["arguments"].(string); ok {
+				var args any
+				if err := json.Unmarshal([]byte(argsStr), &args); err == nil {
+					toolUse["input"] = args
+				} else {
+					toolUse["input"] = map[string]any{}
+				}
+			} else if args, ok := m["arguments"]; ok {
+				toolUse["input"] = args
+			} else {
+				toolUse["input"] = map[string]any{}
+			}
+			currentContent = append(currentContent, toolUse)
+
+		case "function_call_output":
+			// Function output → tool_result block in user message
+			if currentRole != "" && currentRole != "user" {
+				flush()
+			}
+			currentRole = "user"
+
+			callID, _ := m["call_id"].(string)
+			output := ""
+			if s, ok := m["output"].(string); ok {
+				output = s
+			}
+			currentContent = append(currentContent, map[string]any{
+				"type":        "tool_result",
+				"tool_use_id": callID,
+				"content": []any{
+					map[string]any{"type": "text", "text": output},
+				},
+			})
+
+		default:
+			// Unknown type — flush and skip
+			flush()
+		}
+	}
+
+	flush()
+	return messages
+}
+
+// responsesContentToAnthropic converts a Responses API content block to Anthropic format.
+func responsesContentToAnthropic(c any) map[string]any {
+	m, ok := c.(map[string]any)
+	if !ok {
+		return nil
+	}
+	t, _ := m["type"].(string)
+	switch t {
+	case "input_text", "output_text", "text":
+		if text, ok := m["text"].(string); ok {
+			return map[string]any{"type": "text", "text": text}
+		}
+	case "input_image", "image":
+		if url, ok := m["image_url"].(string); ok {
+			return map[string]any{
+				"type": "image",
+				"source": map[string]any{
+					"type": "url",
+					"url":  url,
+				},
+			}
+		}
+	case "refusal":
+		if text, ok := m["refusal"].(string); ok {
+			return map[string]any{"type": "text", "text": text}
+		}
+	}
+	return nil
+}
+
+// mapToolChoiceToAnthropic converts OpenAI Responses tool_choice to Anthropic format.
+func mapToolChoiceToAnthropic(tc any) any {
+	switch v := tc.(type) {
+	case string:
+		switch v {
+		case "required":
+			return map[string]any{"type": "any"}
+		case "auto", "none":
+			return map[string]any{"type": v}
+		default:
+			return map[string]any{"type": "auto"}
+		}
+	case map[string]any:
+		typ, _ := v["type"].(string)
+		switch typ {
+		case "function":
+			if name, ok := v["name"].(string); ok {
+				return map[string]any{"type": "tool", "name": name}
+			}
+			return map[string]any{"type": "any"}
+		case "required":
+			return map[string]any{"type": "any"}
+		case "auto", "none":
+			return map[string]any{"type": v["type"]}
+		default:
+			return map[string]any{"type": "auto"}
+		}
+	}
+	return map[string]any{"type": "auto"}
+}
+
+// convertChatCompletionsToResponses transforms a Chat Completions response
+// to OpenAI Responses API format for Codex compatibility.
+func convertChatCompletionsToResponses(bodyBytes []byte) []byte {
+	var body map[string]any
+	if err := json.Unmarshal(bodyBytes, &body); err != nil {
+		return bodyBytes
+	}
+	if _, ok := body["output"]; ok {
+		return bodyBytes
+	}
+
+	result := make(map[string]any)
+	if id, ok := body["id"].(string); ok && id != "" {
+		result["id"] = id
+	}
+	if model, ok := body["model"].(string); ok {
+		result["model"] = model
+	}
+
+	// Always initialize outputItems as empty slice, not nil
+	outputItems := make([]any, 0)
+	if choices, ok := body["choices"].([]any); ok && len(choices) > 0 {
+		for _, c := range choices {
+			choice, ok := c.(map[string]any)
+			if !ok {
+				continue
+			}
+			message, ok := choice["message"].(map[string]any)
+			if !ok {
+				continue
+			}
+
+			// Content might be empty string (reasoning models put text in reasoning_content)
+			contentVal := message["content"]
+			content := ""
+			if c, ok := contentVal.(string); ok {
+				content = c
+			}
+
+			// If content is empty, check reasoning_content (DeepSeek-specific)
+			if content == "" {
+				if rc, ok := message["reasoning_content"].(string); ok && rc != "" {
+					content = rc
+				}
+			}
+
+			if content != "" {
+				outputItems = append(outputItems, map[string]any{
+					"type":   "message",
+					"role":   "assistant",
+					"status": "completed",
+					"content": []any{
+						map[string]any{"type": "output_text", "text": content},
+					},
+				})
+			} else {
+				// Truly no content - create empty message
+				outputItems = append(outputItems, map[string]any{
+					"type":   "message",
+					"role":   "assistant",
+					"status": "completed",
+					"content": []any{},
+				})
+			}
+
+			if toolCalls, ok := message["tool_calls"].([]any); ok {
+				for _, tc := range toolCalls {
+					tool, ok := tc.(map[string]any)
+					if !ok {
+						continue
+					}
+					fn, ok := tool["function"].(map[string]any)
+					if !ok {
+						continue
+					}
+					callID, _ := tool["id"].(string)
+					name, _ := fn["name"].(string)
+					args, _ := fn["arguments"].(string)
+					outputItems = append(outputItems, map[string]any{
+						"type":      "function_call",
+						"call_id":   callID,
+						"name":      name,
+						"arguments": args,
+						"status":    "completed",
+					})
+				}
+			}
+		}
+	}
+	result["output"] = outputItems
+
+	stopReason, _ := body["stop_reason"].(string)
+	if finishReason, ok := body["finish_reason"].(string); ok && stopReason == "" {
+		stopReason = finishReason
+	}
+	switch stopReason {
+	case "stop", "tool_calls":
+		result["status"] = "completed"
+	case "length":
+		result["status"] = "incomplete"
+	default:
+		result["status"] = "completed"
+	}
+
+	if usage, ok := body["usage"].(map[string]any); ok {
+		responsesUsage := make(map[string]any)
+		if v, ok := usage["prompt_tokens"]; ok {
+			responsesUsage["input_tokens"] = v
+		}
+		if v, ok := usage["completion_tokens"]; ok {
+			responsesUsage["output_tokens"] = v
+		}
+		if v, ok := usage["total_tokens"]; ok {
+			responsesUsage["total_tokens"] = v
+		}
+		if details, ok := usage["prompt_tokens_details"].(map[string]any); ok {
+			if v, ok := details["cached_tokens"]; ok {
+				responsesUsage["input_tokens_details"] = map[string]any{"cached_tokens": v}
+			}
+		}
+		result["usage"] = responsesUsage
+	} else {
+		result["usage"] = map[string]any{"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+	}
+
+	if rewritten, err := json.Marshal(result); err == nil {
+		return rewritten
+	}
+	return bodyBytes
+}
+
+func (tp *TransparentProxy) handleRequest(w http.ResponseWriter, r *http.Request) {
+	debugLog("=== REQUEST %s %s ===", r.Method, r.URL.Path)
+
 	// Buffer the request body so we can retry
 	var bodyBytes []byte
 	if r.Body != nil {
@@ -373,12 +1021,17 @@ func (rp *RetryProxy) handleRequest(w http.ResponseWriter, r *http.Request) {
 		bodyBytes, err = io.ReadAll(r.Body)
 		r.Body.Close()
 		if err != nil {
+			debugLog("ERROR: failed to read request body: %v", err)
 			http.Error(w, "failed to read request body", http.StatusBadRequest)
 			return
 		}
 	}
+	debugLog("Request body (len=%d): %s", len(bodyBytes), string(bodyBytes))
 
-	target := fmt.Sprintf("http://127.0.0.1:%d%s", rp.targetPort, r.URL.RequestURI())
+	// Convert Codex-style "prompt" to "messages" format
+	if len(bodyBytes) > 0 {
+		bodyBytes = convertPromptToMessages(bodyBytes)
+	}
 
 	// Extract model from request body and sanitize tools
 	var modelName string
@@ -391,7 +1044,6 @@ func (rp *RetryProxy) handleRequest(w http.ResponseWriter, r *http.Request) {
 			if reqBody.Model != "" {
 				modelName = reqBody.Model
 			}
-			// Sanitize tools: remove entries with empty names (fixes Codex empty tool bug)
 			if len(reqBody.Tools) > 0 {
 				bodyBytes = sanitizeTools(bodyBytes, reqBody.Tools)
 			}
@@ -399,10 +1051,10 @@ func (rp *RetryProxy) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Rewrite request body model to user's currently selected model.
-	// This ensures MoonBridge uses the correct model even if Codex has stale config.
-	rp.mu.Lock()
-	currentModel := rp.getCurrentModel
-	rp.mu.Unlock()
+	// This ensures the upstream provider uses the correct model even if the client has stale config.
+	tp.mu.Lock()
+	currentModel := tp.getCurrentModel
+	tp.mu.Unlock()
 	if currentModel != nil {
 		selected := currentModel()
 		if selected != "" && modelName != selected {
@@ -410,6 +1062,7 @@ func (rp *RetryProxy) handleRequest(w http.ResponseWriter, r *http.Request) {
 			var body map[string]any
 			if err := json.Unmarshal(bodyBytes, &body); err == nil {
 				body["model"] = selected
+				body["max_tokens"] = 1000000
 				if rewritten, err := json.Marshal(body); err == nil {
 					bodyBytes = rewritten
 					modelName = selected
@@ -418,10 +1071,56 @@ func (rp *RetryProxy) handleRequest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Resolve the model alias to a provider and actual model slug
+	tp.mu.Lock()
+	resolveRoute := tp.resolveRoute
+	tp.mu.Unlock()
+
+	if resolveRoute == nil {
+		http.Error(w, "route resolver not configured", http.StatusInternalServerError)
+		return
+	}
+
+	provider, actualModel, err := resolveRoute(modelName)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("model not found: %s", modelName), http.StatusNotFound)
+		return
+	}
+
+	// Map request path to upstream provider path based on protocol
+	upstreamPath := upstreamPathMapping(r.URL.Path, provider.Protocol)
+	upstreamURL := buildUpstreamURL(provider.BaseURL, upstreamPath)
+	if r.URL.RawQuery != "" {
+		upstreamURL += "?" + r.URL.RawQuery
+	}
+
+	// Update request body model to the actual model slug (not the alias)
+	// and set max_tokens to 1M for all requests.
+	if len(bodyBytes) > 0 {
+		var body map[string]any
+		if err := json.Unmarshal(bodyBytes, &body); err == nil {
+			if actualModel != modelName {
+				body["model"] = actualModel
+			}
+			body["max_tokens"] = 1000000
+			if rewritten, err := json.Marshal(body); err == nil {
+				bodyBytes = rewritten
+			}
+		}
+	}
+
+	// Convert OpenAI Responses API format to Chat Completions format for openai-chat providers.
+	if len(bodyBytes) > 0 && provider.Protocol == "openai-chat" {
+		bodyBytes = convertOpenAItoChatCompletions(bodyBytes)
+	}
+
+	AppLogger.Printf("[Proxy] -> %s %s (provider=%s, model=%s, protocol=%s)", r.Method, upstreamURL, provider.Key, actualModel, provider.Protocol)
+	debugLog("Upstream: %s %s (provider=%s, model=%s, protocol=%s)", r.Method, upstreamURL, provider.Key, actualModel, provider.Protocol)
+
 	var lastResp *http.Response
 	var lastErr error
 
-	for attempt := 0; attempt <= rp.maxRetries; attempt++ {
+	for attempt := 0; attempt <= tp.maxRetries; attempt++ {
 		if attempt > 0 {
 			backoff := time.Duration(500*(1<<uint(attempt-1))) * time.Millisecond
 			time.Sleep(backoff)
@@ -432,17 +1131,25 @@ func (rp *RetryProxy) handleRequest(w http.ResponseWriter, r *http.Request) {
 			bodyReader = bytes.NewReader(bodyBytes)
 		}
 
-		req, err := http.NewRequestWithContext(r.Context(), r.Method, target, bodyReader)
+		req, err := http.NewRequestWithContext(r.Context(), r.Method, upstreamURL, bodyReader)
 		if err != nil {
 			lastErr = err
 			continue
 		}
 
+		// Copy client headers but strip auth headers
 		for key, values := range r.Header {
+			lowerKey := strings.ToLower(key)
+			if lowerKey == "authorization" || lowerKey == "x-api-key" || lowerKey == "anthropic-version" || lowerKey == "x-goog-api-key" {
+				continue
+			}
 			for _, val := range values {
 				req.Header.Add(key, val)
 			}
 		}
+
+		// Set provider auth headers
+		setProviderAuthHeaders(req, provider)
 
 		client := &http.Client{Timeout: 0}
 		resp, err := client.Do(req)
@@ -451,7 +1158,7 @@ func (rp *RetryProxy) handleRequest(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		if resp.StatusCode == http.StatusBadGateway && attempt < rp.maxRetries {
+		if resp.StatusCode == http.StatusBadGateway && attempt < tp.maxRetries {
 			resp.Body.Close()
 			continue
 		}
@@ -462,9 +1169,13 @@ func (rp *RetryProxy) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if lastErr != nil && lastResp == nil {
+		debugLog("Upstream error: %v", lastErr)
+		AppLogger.Printf("[Proxy] <- upstream error: %v", lastErr)
 		http.Error(w, fmt.Sprintf("upstream error: %v", lastErr), http.StatusBadGateway)
 		return
 	}
+
+	debugLog("Upstream response: status=%d", lastResp.StatusCode)
 
 	// Forward response headers
 	for key, values := range lastResp.Header {
@@ -473,62 +1184,424 @@ func (rp *RetryProxy) handleRequest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Log non-SSE responses for debugging
 	ct := lastResp.Header.Get("Content-Type")
+	if lastResp.StatusCode != 200 || !strings.Contains(ct, "text/event-stream") {
+		respBody, _ := io.ReadAll(lastResp.Body)
+		lastResp.Body = io.NopCloser(bytes.NewReader(respBody))
+		AppLogger.Printf("[Proxy] <- status=%d contentType=%s bodyLen=%d", lastResp.StatusCode, ct, len(respBody))
+		debugLog("Non-SSE response: status=%d, ct=%s, bodyLen=%d, body=%s", lastResp.StatusCode, ct, len(respBody), string(respBody))
+		if lastResp.StatusCode != 200 || len(respBody) < 2000 {
+			AppLogger.Printf("[Proxy] <- body: %s", string(respBody))
+		}
+	}
 
 	// Handle SSE streaming responses
 	if lastResp.StatusCode == 200 && strings.Contains(ct, "text/event-stream") {
+		AppLogger.Printf("[Proxy] <- SSE streaming, status=%d", lastResp.StatusCode)
+
+		// Set explicit SSE headers for Codex compatibility
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		w.Header().Set("X-Accel-Buffering", "no")
 		w.WriteHeader(200)
 
-		extractor := &SSEUsageExtractor{model: modelName}
-		scanner := bufio.NewScanner(lastResp.Body)
-		var eventBuf strings.Builder
-		eventStarted := false
+		extractor := &SSEUsageExtractor{model: actualModel}
+		reader := bufio.NewReader(lastResp.Body)
+		// No event buffering needed - each data: line processed immediately
 		var lastCompletedEvent string
 
-		for scanner.Scan() {
-			line := scanner.Text()
+		// Determine if we need to convert Chat Completions SSE → OpenAI Responses SSE
+		convertSSE := provider.Protocol == "openai-chat"
 
-			// Capture data lines for usage extraction
-			if strings.HasPrefix(line, "data: ") {
-				eventStarted = true
-				eventBuf.WriteString(line[6:])
-			} else if strings.HasPrefix(line, "data:") {
-				eventStarted = true
-				eventBuf.WriteString(line[5:])
+		// SSE conversion state — matches cc-switch ChatToResponsesState
+		var sseMessageID, sseModel string
+		var sseHasEmittedCreated, sseHasCompleted bool
+		var sseHasEmittedText, sseHasEmittedReasoning bool
+		var sseTextContent, sseReasoningContent strings.Builder
+		var sseToolID, sseToolName string
+		var sseToolArgsBuilder strings.Builder
+		var sseHasToolCall bool
+		sseOutputIndex := 0    // increments for each output item
+		sseCurrentItemID := "" // item_id for current output item
+
+		writeSSEEvent := func(eventType string, data any) {
+			// cc-switch adds "type" field inside the data payload matching the event name
+			if m, ok := data.(map[string]any); ok {
+				m["type"] = eventType
 			}
-
-			// Empty line = end of event
-			if line == "" && eventStarted {
-				data := eventBuf.String()
-				if strings.Contains(data, "response.completed") {
-					lastCompletedEvent = data
-				}
-				extractor.parseAnthropicSSE(data)
-				extractor.parseOpenAISSE(data)
-				extractor.parseOpenAIResponsesSSE(data)
-				eventBuf.Reset()
-				eventStarted = false
-			}
-
-			// Forward line to client
-			_, _ = w.Write([]byte(line + "\n"))
+			jsonBytes, _ := json.Marshal(data)
+			line := fmt.Sprintf("event: %s\ndata: %s\n\n", eventType, string(jsonBytes))
+			_, _ = w.Write([]byte(line))
 			if f, ok := w.(http.Flusher); ok {
 				f.Flush()
 			}
 		}
 
-		// Process any remaining event data
-		if eventStarted {
-			data := eventBuf.String()
-			if strings.Contains(data, "response.completed") {
-				lastCompletedEvent = data
+		buildResponseObj := func(status string, output []any) map[string]any {
+			return map[string]any{
+				"id":                    sseMessageID,
+				"object":                "response",
+				"created_at":            time.Now().Unix(),
+				"status":                status,
+				"error":                 nil,
+				"incomplete_details":    nil,
+				"instructions":          nil,
+				"max_output_tokens":     nil,
+				"model":                 sseModel,
+				"parallel_tool_calls":   true,
+				"prompt":                nil,
+				"temperature":           nil,
+				"tool_choice":           "auto",
+				"tools":                 []any{},
+				"top_logprobs":          nil,
+				"top_p":                 nil,
+				"truncation":            "auto",
+				"usage":                 nil,
+				"metadata":              map[string]any{},
+				"user":                  nil,
+				"output":                output,
 			}
-			extractor.parseAnthropicSSE(data)
-			extractor.parseOpenAISSE(data)
-			extractor.parseOpenAIResponsesSSE(data)
 		}
 
-		// Debug: write SSE parsing result to file
+		// emitResponseStarted: cc-switch emits both response.created AND response.in_progress
+		emitResponseStarted := func() {
+			if sseHasEmittedCreated {
+				return
+			}
+			respObj := buildResponseObj("in_progress", []any{})
+			respObj["usage"] = map[string]any{
+				"input_tokens":  0,
+				"output_tokens": 0,
+				"total_tokens":  0,
+			}
+			writeSSEEvent("response.created", map[string]any{"response": respObj})
+			writeSSEEvent("response.in_progress", map[string]any{"response": respObj})
+			sseHasEmittedCreated = true
+		}
+
+		// sseFinalize: called unconditionally at stream end (cc-switch finalize pattern)
+		sseFinalize := func() {
+			if sseHasCompleted {
+				return
+			}
+			sseHasCompleted = true
+
+			// Close any open tool call
+			if sseHasToolCall && sseToolID != "" {
+				writeSSEEvent("response.output_item.added", map[string]any{
+					"output_index": sseOutputIndex,
+					"item": map[string]any{
+						"type":      "function_call",
+						"id":        sseToolID,
+						"name":      sseToolName,
+						"status":    "completed",
+						"arguments": sseToolArgsBuilder.String(),
+					},
+				})
+				writeSSEEvent("response.function_call_arguments.done", map[string]any{
+					"output_index": sseOutputIndex,
+					"item_id":      sseToolID,
+					"parsed":       nil,
+					"arguments":    sseToolArgsBuilder.String(),
+				})
+				writeSSEEvent("response.output_item.done", map[string]any{
+					"output_index": sseOutputIndex,
+					"item": map[string]any{
+						"type":      "function_call",
+						"id":        sseToolID,
+						"name":      sseToolName,
+						"status":    "completed",
+						"arguments": sseToolArgsBuilder.String(),
+					},
+				})
+				sseOutputIndex++
+			}
+
+			// Close reasoning item if any
+			if sseHasEmittedReasoning {
+				writeSSEEvent("response.reasoning_summary_text.done", map[string]any{
+					"output_index": sseOutputIndex - 1,
+					"item_id":      sseCurrentItemID,
+					"text":         sseReasoningContent.String(),
+				})
+				writeSSEEvent("response.output_item.done", map[string]any{
+					"output_index": sseOutputIndex - 1,
+					"item": map[string]any{
+						"type":   "reasoning",
+						"id":     sseCurrentItemID,
+						"status": "completed",
+					},
+				})
+			}
+
+			// Close text item if any
+			if sseHasEmittedText {
+				writeSSEEvent("response.content_part.done", map[string]any{
+					"output_index":  sseOutputIndex - 1,
+					"item_id":       sseCurrentItemID,
+					"content_index": 0,
+					"part": map[string]any{
+						"type": "output_text",
+						"text": sseTextContent.String(),
+					},
+				})
+				writeSSEEvent("response.output_item.done", map[string]any{
+					"output_index": sseOutputIndex - 1,
+					"item": map[string]any{
+						"type":   "message",
+						"role":   "assistant",
+						"status": "completed",
+						"content": []any{
+							map[string]any{"type": "output_text", "text": sseTextContent.String()},
+						},
+					},
+				})
+			}
+
+			// Build output array for response.completed
+			var outputItems []any
+			reasoningIdx := -1
+			if sseHasEmittedReasoning {
+				reasoningIdx = len(outputItems)
+				outputItems = append(outputItems, map[string]any{
+					"type":   "reasoning",
+					"id":     fmt.Sprintf("reasoning-%d", reasoningIdx),
+					"status": "completed",
+					"summary": []any{
+						map[string]any{"type": "text", "text": sseReasoningContent.String()},
+					},
+				})
+			}
+			if sseHasEmittedText {
+				outputItems = append(outputItems, map[string]any{
+					"type":   "message",
+					"role":   "assistant",
+					"status": "completed",
+					"content": []any{
+						map[string]any{"type": "output_text", "text": sseTextContent.String()},
+					},
+				})
+			}
+
+			resp := buildResponseObj("completed", outputItems)
+			resp["usage"] = map[string]any{
+				"input_tokens":            extractor.inputTokens,
+				"output_tokens":           extractor.outputTokens,
+				"total_tokens":            extractor.inputTokens + extractor.outputTokens,
+				"input_tokens_details":    map[string]any{"cached_tokens": extractor.cacheRead},
+				"output_tokens_details":   map[string]any{"reasoning_tokens": 0},
+			}
+			writeSSEEvent("response.completed", map[string]any{"response": resp})
+		}
+
+		// startReasoningItem: cc-switch pushReasoningSummaryPartAdded
+		startReasoningItem := func() {
+			emitResponseStarted()
+			itemID := fmt.Sprintf("reasoning-%d", sseOutputIndex)
+			sseCurrentItemID = itemID
+			writeSSEEvent("response.output_item.added", map[string]any{
+				"output_index": sseOutputIndex,
+				"item": map[string]any{
+					"type":   "reasoning",
+					"id":     itemID,
+					"status": "in_progress",
+				},
+			})
+			writeSSEEvent("response.reasoning_summary_part.added", map[string]any{
+				"output_index": sseOutputIndex,
+				"item_id":      itemID,
+				"part":         map[string]any{"type": "text"},
+			})
+			sseHasEmittedReasoning = true
+			sseOutputIndex++
+		}
+
+		// startTextItem: cc-switch pushContentPartAdded + pushOutputTextStarted
+		startTextItem := func() {
+			emitResponseStarted()
+			itemID := fmt.Sprintf("msg-%d", sseOutputIndex)
+			sseCurrentItemID = itemID
+			writeSSEEvent("response.output_item.added", map[string]any{
+				"output_index": sseOutputIndex,
+				"item": map[string]any{
+					"type":   "message",
+					"id":     itemID,
+					"role":   "assistant",
+					"status": "in_progress",
+				},
+			})
+			writeSSEEvent("response.content_part.added", map[string]any{
+				"output_index":  sseOutputIndex,
+				"item_id":       itemID,
+				"content_index": 0,
+				"part": map[string]any{
+					"type": "output_text",
+					"text": "",
+				},
+			})
+			sseHasEmittedText = true
+			sseOutputIndex++
+		}
+
+		// SSE line reader using bufio.Reader for proper streaming
+		for {
+			line, err := reader.ReadString('\n')
+			if err != nil && err != io.EOF {
+				break
+			}
+			line = strings.TrimSuffix(line, "\n")
+			line = strings.TrimSuffix(line, "\r")
+
+			// Only process data: lines; ignore blank lines and other SSE fields
+			var dataStr string
+			if strings.HasPrefix(line, "data: ") {
+				dataStr = line[6:]
+			} else if strings.HasPrefix(line, "data:") {
+				dataStr = line[5:]
+			} else {
+				if err == io.EOF {
+					break
+				}
+				continue
+			}
+
+			if dataStr == "[DONE]" {
+					sseFinalize()
+					lastCompletedEvent = dataStr
+					break
+				}
+
+				var eventData map[string]any
+				_ = json.Unmarshal([]byte(dataStr), &eventData)
+
+				if convertSSE {
+					if id, ok := eventData["id"].(string); ok && sseMessageID == "" {
+						sseMessageID = id
+					}
+					if model, ok := eventData["model"].(string); ok && sseModel == "" {
+						sseModel = model
+					}
+
+					if usage, ok := eventData["usage"].(map[string]any); ok {
+						if v, ok := usage["prompt_tokens"].(float64); ok {
+							extractor.inputTokens = int(v)
+						}
+						if v, ok := usage["completion_tokens"].(float64); ok {
+							extractor.outputTokens = int(v)
+						}
+					}
+
+					if choices, ok := eventData["choices"].([]any); ok {
+						for _, c := range choices {
+							choice, _ := c.(map[string]any)
+							delta, _ := choice["delta"].(map[string]any)
+							finishReason, _ := choice["finish_reason"].(string)
+
+							// Tool calls
+							if finishReason == "tool_calls" || (delta["tool_calls"] != nil && !sseHasToolCall) {
+								sseHasToolCall = true
+								if toolCalls, ok := delta["tool_calls"].([]any); ok {
+									for _, tc := range toolCalls {
+										tool, _ := tc.(map[string]any)
+										if fn, ok := tool["function"].(map[string]any); ok {
+											if id, ok := tool["id"].(string); ok && id != "" {
+												if sseToolID != "" {
+													writeSSEEvent("response.output_item.added", map[string]any{
+														"output_index": sseOutputIndex,
+														"item": map[string]any{
+															"type":      "function_call",
+															"id":        sseToolID,
+															"name":      sseToolName,
+															"status":    "completed",
+															"arguments": sseToolArgsBuilder.String(),
+														},
+													})
+													writeSSEEvent("response.function_call_arguments.done", map[string]any{
+														"output_index": sseOutputIndex,
+														"item_id":      sseToolID,
+														"parsed":       nil,
+														"arguments":    sseToolArgsBuilder.String(),
+													})
+													writeSSEEvent("response.output_item.done", map[string]any{
+														"output_index": sseOutputIndex,
+														"item": map[string]any{
+															"type":      "function_call",
+															"id":        sseToolID,
+															"name":      sseToolName,
+															"status":    "completed",
+															"arguments": sseToolArgsBuilder.String(),
+														},
+													})
+													sseOutputIndex++
+												}
+												sseToolID = id
+												sseToolArgsBuilder.Reset()
+											}
+											if name, ok := fn["name"].(string); ok && name != "" {
+												sseToolName = name
+											}
+											if args, ok := fn["arguments"].(string); ok {
+												sseToolArgsBuilder.WriteString(args)
+											}
+										}
+									}
+								}
+							}
+
+							// Text content delta
+							if content, ok := delta["content"].(string); ok && content != "" {
+								if !sseHasEmittedText {
+									startTextItem()
+								}
+								writeSSEEvent("response.output_text.delta", map[string]any{
+									"output_index":  sseOutputIndex - 1,
+									"item_id":       sseCurrentItemID,
+									"content_index": 0,
+									"delta":         content,
+								})
+								sseTextContent.WriteString(content)
+							}
+
+							// DeepSeek reasoning_content → separate reasoning item
+							if rc, ok := delta["reasoning_content"].(string); ok && rc != "" {
+								if !sseHasEmittedReasoning {
+									startReasoningItem()
+								}
+								writeSSEEvent("response.reasoning_summary_text.delta", map[string]any{
+									"output_index": sseOutputIndex - 1,
+									"item_id":      sseCurrentItemID,
+									"text":         rc,
+								})
+								sseReasoningContent.WriteString(rc)
+							}
+						}
+					}
+				} else {
+					// Pass through non-converted SSE events
+					if strings.Contains(dataStr, "response.completed") {
+						lastCompletedEvent = dataStr
+					}
+					extractor.parseAnthropicSSE(dataStr)
+					extractor.parseOpenAISSE(dataStr)
+					extractor.parseOpenAIResponsesSSE(dataStr)
+					_, _ = w.Write([]byte("data: " + dataStr + "\n\n"))
+					if f, ok := w.(http.Flusher); ok {
+						f.Flush()
+					}
+				}
+
+			if err == io.EOF {
+				break
+			}
+		}
+
+		// Always call finalize at stream end (cc-switch pattern)
+		if convertSSE {
+			sseFinalize()
+		}
+
 		go func() {
 			logPath := filepath.Join(os.TempDir(), "moonbridge-sse-v2.log")
 			f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
@@ -547,8 +1620,8 @@ func (rp *RetryProxy) handleRequest(w http.ResponseWriter, r *http.Request) {
 			}
 		}()
 
-		extractor.recordUsage(rp)
-		extractor.recordPerRequest(rp)
+		extractor.recordUsage(tp)
+		extractor.recordPerRequest(tp)
 		lastResp.Body.Close()
 		return
 	}
@@ -560,8 +1633,8 @@ func (rp *RetryProxy) handleRequest(w http.ResponseWriter, r *http.Request) {
 		respBody = []byte{}
 	}
 
-	// Extract actual model from upstream response (request body model may be stale)
-	upstreamModel := modelName
+	// Extract actual model from upstream response
+	upstreamModel := actualModel
 	if len(respBody) > 0 {
 		var rm responseModel
 		if err := json.Unmarshal(respBody, &rm); err == nil && rm.Model != "" {
@@ -569,33 +1642,19 @@ func (rp *RetryProxy) handleRequest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	resolvedModel := upstreamModel
-	rp.mu.Lock()
-	if rp.resolveModel != nil {
-		resolvedModel = rp.resolveModel(upstreamModel)
-	}
-	rp.mu.Unlock()
-
 	if lastResp.StatusCode == 200 && strings.Contains(ct, "application/json") && len(respBody) > 0 {
-		// Try OpenAI Responses API first (MoonBridge /v1/responses)
+		// Try OpenAI Responses API first
 		var r responseUsageResponses
 		if err := json.Unmarshal(respBody, &r); err == nil && r.Usage.InputTokens > 0 {
-			// Use response model if we got one, fall back to resolvedModel
-			recModel := resolvedModel
+			recModel := upstreamModel
 			if r.Model != "" {
-				rp.mu.Lock()
-				if rp.resolveModel != nil {
-					recModel = rp.resolveModel(r.Model)
-				} else {
-					recModel = r.Model
-				}
-				rp.mu.Unlock()
+				recModel = r.Model
 			}
 			AppLogger.Printf("[UsageRecord] Responses API: model=%s input=%d output=%d cacheRead=%d cacheWrite=%d",
 				recModel, r.Usage.InputTokens, r.Usage.OutputTokens, r.Usage.InputTokensDetails.CachedTokens, 0)
-			rp.mu.Lock()
-			if rp.recordUsage != nil {
-				rp.recordUsage(
+			tp.mu.Lock()
+			if tp.recordUsage != nil {
+				tp.recordUsage(
 					recModel,
 					r.Usage.InputTokens,
 					r.Usage.OutputTokens,
@@ -603,63 +1662,80 @@ func (rp *RetryProxy) handleRequest(w http.ResponseWriter, r *http.Request) {
 					0,
 				)
 			}
-			if rp.recordRequest != nil {
-				rp.recordRequest(recModel)
+			if tp.recordRequest != nil {
+				tp.recordRequest(recModel)
 			}
-			rp.mu.Unlock()
+			tp.mu.Unlock()
 		} else {
 			// Try Anthropic-style
 			var u responseUsage
 			if err := json.Unmarshal(respBody, &u); err == nil && u.Usage.InputTokens > 0 {
 				AppLogger.Printf("[UsageRecord] Anthropic path: model=%s input=%d output=%d cacheRead=%d cacheWrite=%d",
-					resolvedModel, u.Usage.InputTokens, u.Usage.OutputTokens, u.Usage.InputTokensDetails.CachedTokens, u.Usage.CacheCreationInputTokens)
-				rp.mu.Lock()
-				if rp.recordUsage != nil {
-					rp.recordUsage(
-						resolvedModel,
+					upstreamModel, u.Usage.InputTokens, u.Usage.OutputTokens, u.Usage.InputTokensDetails.CachedTokens, u.Usage.CacheCreationInputTokens)
+				tp.mu.Lock()
+				if tp.recordUsage != nil {
+					tp.recordUsage(
+						upstreamModel,
 						u.Usage.InputTokens,
 						u.Usage.OutputTokens,
 						u.Usage.InputTokensDetails.CachedTokens,
 						u.Usage.CacheCreationInputTokens,
 					)
 				}
-				if rp.recordRequest != nil {
-					rp.recordRequest(resolvedModel)
+				if tp.recordRequest != nil {
+					tp.recordRequest(upstreamModel)
 				}
-				rp.mu.Unlock()
+				tp.mu.Unlock()
 			} else {
 				// Fallback: OpenAI-style
 				var o responseUsageOpenAI
 				if err := json.Unmarshal(respBody, &o); err == nil && o.Usage.PromptTokens > 0 {
 					AppLogger.Printf("[UsageRecord] OpenAI path: model=%s prompt=%d completion=%d",
-						resolvedModel, o.Usage.PromptTokens, o.Usage.CompletionTokens)
-					rp.mu.Lock()
-					if rp.recordUsage != nil {
-						rp.recordUsage(
-							resolvedModel,
+						upstreamModel, o.Usage.PromptTokens, o.Usage.CompletionTokens)
+					tp.mu.Lock()
+					if tp.recordUsage != nil {
+						tp.recordUsage(
+							upstreamModel,
 							o.Usage.PromptTokens,
 							o.Usage.CompletionTokens,
 							o.Usage.PromptTokensDetails.CachedTokens,
 							0,
 						)
 					}
-					if rp.recordRequest != nil {
-						rp.recordRequest(resolvedModel)
+					if tp.recordRequest != nil {
+						tp.recordRequest(upstreamModel)
 					}
-					rp.mu.Unlock()
+					tp.mu.Unlock()
 				} else {
-					// Usage parsing failed, but still record per-request with resolved model
-					AppLogger.Printf("[UsageRecord] No usage data extracted, recording per-request: model=%s", resolvedModel)
-					rp.mu.Lock()
-					if rp.recordRequest != nil {
-						rp.recordRequest(resolvedModel)
+					// Usage parsing failed, but still record per-request
+					AppLogger.Printf("[UsageRecord] No usage data extracted, recording per-request: model=%s", upstreamModel)
+					tp.mu.Lock()
+					if tp.recordRequest != nil {
+						tp.recordRequest(upstreamModel)
 					}
-					rp.mu.Unlock()
+					tp.mu.Unlock()
 				}
 			}
 		}
 	} else {
 		AppLogger.Printf("[UsageRecord] Skipped: status=%d ct=%s bodyLen=%d", lastResp.StatusCode, ct, len(respBody))
+	}
+
+	// Convert Chat Completions response back to OpenAI Responses API format for Codex compatibility.
+	if len(respBody) > 0 && provider.Protocol == "openai-chat" {
+		AppLogger.Printf("[NonStreamDebug] UPSTREAM response (len=%d):", len(respBody))
+		if len(respBody) > 4000 {
+			AppLogger.Printf("[NonStreamDebug] ...truncated: %s...", string(respBody[:4000]))
+		} else {
+			AppLogger.Printf("[NonStreamDebug] %s", string(respBody))
+		}
+		respBody = convertChatCompletionsToResponses(respBody)
+		AppLogger.Printf("[NonStreamDebug] CONVERTED result (len=%d):", len(respBody))
+		if len(respBody) > 4000 {
+			AppLogger.Printf("[NonStreamDebug] ...truncated: %s...", string(respBody[:4000]))
+		} else {
+			AppLogger.Printf("[NonStreamDebug] %s", string(respBody))
+		}
 	}
 
 	w.WriteHeader(lastResp.StatusCode)

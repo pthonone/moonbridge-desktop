@@ -101,7 +101,7 @@ type ProviderPreset struct {
 	Models   []OfferConfig `json:"models"`
 }
 
-// PresetProviderDeepseek is the DeepSeek V4 preset.
+// PresetProviderDeepseek is the DeepSeek preset.
 func PresetProviderDeepseek() ProviderPreset {
 	return ProviderPreset{
 		Key:      "deepseek",
@@ -109,18 +109,7 @@ func PresetProviderDeepseek() ProviderPreset {
 		BaseURL:  "https://api.deepseek.com/anthropic",
 		Protocol: "anthropic",
 		Version:  "2023-06-01",
-		Models: []OfferConfig{
-			{
-				Model:       "deepseek-v4-pro",
-				PricingTier: "standard",
-				Pricing:     Pricing{Input: 2, Output: 8, CacheWrite: 1, CacheRead: 0.2, BillingMode: "token"},
-			},
-			{
-				Model:       "deepseek-v4-flash",
-				PricingTier: "economy",
-				Pricing:     Pricing{Input: 1, Output: 2, CacheWrite: 1, CacheRead: 0.02, BillingMode: "token"},
-			},
-		},
+		Models:   []OfferConfig{},
 	}
 }
 
@@ -132,23 +121,7 @@ func PresetProviderQwen() ProviderPreset {
 		BaseURL:  "https://dashscope.aliyuncs.com/compatible-mode/v1",
 		Protocol: "openai-chat",
 		Version:  "",
-		Models: []OfferConfig{
-			{
-				Model:       "qwen-max",
-				PricingTier: "premium",
-				Pricing:     Pricing{Input: 2, Output: 6, CacheWrite: 0, CacheRead: 0, BillingMode: "token"},
-			},
-			{
-				Model:       "qwen-plus",
-				PricingTier: "standard",
-				Pricing:     Pricing{Input: 1, Output: 3, CacheWrite: 0, CacheRead: 0, BillingMode: "token"},
-			},
-			{
-				Model:       "qwen-coder",
-				PricingTier: "standard",
-				Pricing:     Pricing{BillingMode: "per_request", PerRequestCost: 0.0022},
-			},
-		},
+		Models:   []OfferConfig{},
 	}
 }
 
@@ -160,13 +133,7 @@ func PresetProviderAnthropic() ProviderPreset {
 		BaseURL:  "https://api.anthropic.com",
 		Protocol: "anthropic",
 		Version:  "2023-06-01",
-		Models: []OfferConfig{
-			{
-				Model:       "claude-sonnet-4-20250514",
-				PricingTier: "premium",
-				Pricing:     Pricing{Input: 3, Output: 15, CacheWrite: 3.75, CacheRead: 0.3, BillingMode: "token"},
-			},
-		},
+		Models:   []OfferConfig{},
 	}
 }
 
@@ -178,33 +145,7 @@ func PresetProviderOpenAI() ProviderPreset {
 		BaseURL:  "https://api.openai.com/v1",
 		Protocol: "openai-chat",
 		Version:  "",
-		Models: []OfferConfig{
-			{
-				Model:       "gpt-4.1",
-				PricingTier: "premium",
-				Pricing:     Pricing{Input: 2, Output: 8, CacheWrite: 0.5, CacheRead: 0.2, BillingMode: "token"},
-			},
-			{
-				Model:       "gpt-4.1-mini",
-				PricingTier: "standard",
-				Pricing:     Pricing{Input: 1, Output: 4, CacheWrite: 0.25, CacheRead: 0.1, BillingMode: "token"},
-			},
-			{
-				Model:       "gpt-4.1-nano",
-				PricingTier: "economy",
-				Pricing:     Pricing{Input: 0.5, Output: 2, CacheWrite: 0.1, CacheRead: 0.05, BillingMode: "token"},
-			},
-			{
-				Model:       "o3",
-				PricingTier: "ultra",
-				Pricing:     Pricing{Input: 3, Output: 12, CacheWrite: 0, CacheRead: 0, BillingMode: "token"},
-			},
-			{
-				Model:       "o4-mini",
-				PricingTier: "premium",
-				Pricing:     Pricing{Input: 2, Output: 8, CacheWrite: 0, CacheRead: 0, BillingMode: "token"},
-			},
-		},
+		Models:   []OfferConfig{},
 	}
 }
 
@@ -216,23 +157,7 @@ func PresetProviderGoogle() ProviderPreset {
 		BaseURL:  "https://generativelanguage.googleapis.com/v1beta/openai",
 		Protocol: "openai-chat",
 		Version:  "",
-		Models: []OfferConfig{
-			{
-				Model:       "gemini-2.5-pro",
-				PricingTier: "premium",
-				Pricing:     Pricing{Input: 1.25, Output: 10, CacheWrite: 0, CacheRead: 0, BillingMode: "token"},
-			},
-			{
-				Model:       "gemini-2.5-flash",
-				PricingTier: "standard",
-				Pricing:     Pricing{Input: 0.3, Output: 2.5, CacheWrite: 0, CacheRead: 0, BillingMode: "token"},
-			},
-			{
-				Model:       "gemini-2.0-flash",
-				PricingTier: "economy",
-				Pricing:     Pricing{Input: 0.1, Output: 0.4, CacheWrite: 0, CacheRead: 0, BillingMode: "token"},
-			},
-		},
+		Models:   []OfferConfig{},
 	}
 }
 
@@ -244,28 +169,7 @@ func PresetProviderOpenRouter() ProviderPreset {
 		BaseURL:  "https://openrouter.ai/api/v1",
 		Protocol: "openai-chat",
 		Version:  "",
-		Models: []OfferConfig{
-			{
-				Model:       "claude-sonnet-4",
-				PricingTier: "premium",
-				Pricing:     Pricing{Input: 3, Output: 15, CacheWrite: 3.75, CacheRead: 0.3, BillingMode: "token"},
-			},
-			{
-				Model:       "gemini-2.5-pro",
-				PricingTier: "premium",
-				Pricing:     Pricing{Input: 1.25, Output: 10, CacheWrite: 0, CacheRead: 0, BillingMode: "token"},
-			},
-			{
-				Model:       "gpt-4.1",
-				PricingTier: "premium",
-				Pricing:     Pricing{Input: 2, Output: 8, CacheWrite: 0.5, CacheRead: 0.2, BillingMode: "token"},
-			},
-			{
-				Model:       "meta-llama/llama-3.1-70b-instruct",
-				PricingTier: "standard",
-				Pricing:     Pricing{Input: 0.1, Output: 0.3, CacheWrite: 0, CacheRead: 0, BillingMode: "token"},
-			},
-		},
+		Models:   []OfferConfig{},
 	}
 }
 
@@ -277,23 +181,7 @@ func PresetProviderOllama() ProviderPreset {
 		BaseURL:  "http://localhost:11434/v1",
 		Protocol: "openai-chat",
 		Version:  "",
-		Models: []OfferConfig{
-			{
-				Model:       "llama3",
-				PricingTier: "free",
-				Pricing:     Pricing{BillingMode: "free"},
-			},
-			{
-				Model:       "qwen2.5",
-				PricingTier: "free",
-				Pricing:     Pricing{BillingMode: "free"},
-			},
-			{
-				Model:       "codestral",
-				PricingTier: "free",
-				Pricing:     Pricing{BillingMode: "free"},
-			},
-		},
+		Models:   []OfferConfig{},
 	}
 }
 
@@ -305,22 +193,6 @@ func PresetProviderSiliconFlow() ProviderPreset {
 		BaseURL:  "https://api.siliconflow.cn/v1",
 		Protocol: "openai-chat",
 		Version:  "",
-		Models: []OfferConfig{
-			{
-				Model:       "Qwen/Qwen2.5-72B-Instruct",
-				PricingTier: "standard",
-				Pricing:     Pricing{Input: 2, Output: 6, CacheWrite: 0, CacheRead: 0, BillingMode: "token"},
-			},
-			{
-				Model:       "deepseek-ai/DeepSeek-V3",
-				PricingTier: "economy",
-				Pricing:     Pricing{Input: 1, Output: 2, CacheWrite: 0, CacheRead: 0, BillingMode: "token"},
-			},
-			{
-				Model:       "THUDM/glm-4-9b-chat",
-				PricingTier: "economy",
-				Pricing:     Pricing{Input: 0.5, Output: 1, CacheWrite: 0, CacheRead: 0, BillingMode: "token"},
-			},
-		},
+		Models:   []OfferConfig{},
 	}
 }
